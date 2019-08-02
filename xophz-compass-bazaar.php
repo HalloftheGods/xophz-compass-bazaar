@@ -15,7 +15,7 @@
  * @wordpress-plugin
  * Plugin Name:       Xophz Bazaar
  * Plugin URI:        https://www.mycompassconsulting.com/bazaar/
- * Description:       Supercharged UI for managing your inventory, orders, and viewing sales data in real time.
+ * Description:       This supercharged UI helps you quickly manage your woocommerce inventory, orders, and view sales data in real time.
  * Version:           1.0.0
  * Author:            Xoph
  * Author URI:        http://example.com/

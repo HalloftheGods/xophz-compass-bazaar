@@ -20,8 +20,11 @@
  * @subpackage Xophz_Compass_Bazaar/admin
  * @author     Your Name <email@example.com>
  */
-include_once( WC()->plugin_path() . '/includes/admin/reports/class-wc-admin-report.php' );
-include_once( WC()->plugin_path() . '/includes/admin/reports/class-wc-report-sales-by-date.php' );
+if(function_exists('WC')){
+  include_once( WC()->plugin_path() . '/includes/admin/reports/class-wc-admin-report.php' );
+  include_once( WC()->plugin_path() . '/includes/admin/reports/class-wc-report-sales-by-date.php' );
+}
+
 
 class Xophz_Compass_Bazaar_Admin_Reports{
   /**
