@@ -385,7 +385,7 @@ class Xophz_Compass_Bazaar_Admin_Sales{
           {$wpdb->prefix}woocommerce_order_items oi on p.ID = oi.order_id,		
           {$wpdb->prefix}woocommerce_order_itemmeta as oim	
         WHERE 
-          p.post_date BETWEEN '{$thisMonth}' AND '{$nextMonth}' 
+          p.post_modified BETWEEN '{$thisMonth}' AND '{$nextMonth}' 
         AND
           p.post_type = 'shop_order'
         AND
