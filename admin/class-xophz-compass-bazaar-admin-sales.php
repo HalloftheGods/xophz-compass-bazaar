@@ -345,7 +345,7 @@ class Xophz_Compass_Bazaar_Admin_Sales{
       $sku = " WHERE pm.meta_value {$sku} ";
     }
 
-    return "
+    $sql = "
       Select
         itemName as Product,
         pm.meta_value as SKUID,
@@ -365,35 +365,37 @@ class Xophz_Compass_Bazaar_Admin_Sales{
         From 
         (
           SELECT 
-          post_date,
-          oi.order_id as orderId,
-          oi.order_item_id as itemId,
-          oi.order_item_name as itemName,
-          oi.order_item_type as itemType,
-          max( CASE WHEN oim.meta_key = '_product_id' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as productID, 
-          max( CASE WHEN oim.meta_key = 'SKU' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as SKU,
-          max( CASE WHEN oim.meta_key = '_qty' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as Qty,
-          max( CASE WHEN oim.meta_key = '_variation_id' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as variationID,
-          max( CASE WHEN oim.meta_key = '_line_total' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as lineTotal,
-          max( CASE WHEN oim.meta_key = '_line_subtotal_tax' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as subTotalTax,
-          max( CASE WHEN oim.meta_key = '_line_tax' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as Tax,
-          max( CASE WHEN oim.meta_key = '_tax_class' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as taxClass,
-          max( CASE WHEN oim.meta_key = '_line_subtotal' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as subtotal
+            oi.order_id as orderId,
+            oi.order_item_id as itemId,
+            oi.order_item_name as itemName,
+            oi.order_item_type as itemType,
+            max( CASE WHEN oim.meta_key = '_product_id' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as productID, 
+            max( CASE WHEN oim.meta_key = 'SKU' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as SKU,
+            max( CASE WHEN oim.meta_key = '_qty' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as Qty,
+            max( CASE WHEN oim.meta_key = '_variation_id' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as variationID,
+            max( CASE WHEN oim.meta_key = '_line_total' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as lineTotal,
+            max( CASE WHEN oim.meta_key = '_line_subtotal_tax' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as subTotalTax,
+            max( CASE WHEN oim.meta_key = '_line_tax' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as Tax,
+            max( CASE WHEN oim.meta_key = '_tax_class' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as taxClass,
+            max( CASE WHEN oim.meta_key = '_line_subtotal' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as subtotal
         FROM
           {$wpdb->posts} p 
-          JOIN 
-          {$wpdb->prefix}woocommerce_order_items oi on p.ID = oi.order_id,		
-          {$wpdb->prefix}woocommerce_order_itemmeta as oim	
+          LEFT JOIN 
+          {$wpdb->prefix}woocommerce_order_items oi on p.ID = oi.order_id		
+          LEFT JOIN 
+          {$wpdb->prefix}woocommerce_order_itemmeta as oim on 	oi.order_item_id = oim.order_item_id
         WHERE 
-          p.post_modified BETWEEN '{$thisMonth}' AND '{$nextMonth}' 
-        AND
-          p.post_type = 'shop_order'
+          (
+            ( p.post_date_gmt BETWEEN '{$thisMonth}' AND '{$nextMonth}' ) 
+            OR
+            (
+              p.post_modified_gmt BETWEEN '{$thisMonth}' AND '{$nextMonth}'
+              AND
+              p.post_type = 'shop_order_refund'
+            )
+          )
         AND
           p.post_status in ('wc-{$status}')
-        AND
-          order_item_type = 'line_item' 
-        AND
-          oi.order_item_id = oim.order_item_id
         GROUP BY
           oi.order_item_id 
         ORDER BY 
@@ -415,6 +417,9 @@ class Xophz_Compass_Bazaar_Admin_Sales{
         Sales DESC
 
     ";
+    echo $sql;
+    return $sql;
+
   }
   
 }
