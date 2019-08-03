@@ -217,12 +217,13 @@ class Xophz_Compass_Bazaar_Admin_Sales{
           400
         );
 
-      $_SESSION['sales_month'] = $args->date;
-      $_SESSION['sales_status'] = $args->status;
-      $_SESSION['sales_sku'] = $args->sku;
-      $_SESSION['sales_sku_scope'] = $args->sku_scope;
+      $settings['month'] = $args->date;
+      $settings['status'] = $args->status;
+      $settings['sku'] = $args->sku;
+      $settings['sku_scope'] = $args->sku_scope;
+      $settings['gmt'] = $args->gmt;
 
-      $monthly_sales = Xophz_Compass_Bazaar_Admin_Sales::getMonthlyReportSql();
+      $monthly_sales = Xophz_Compass_Bazaar_Admin_Sales::getMonthlyReportSql($settings);
 
       $sql = "
         SELECT 
@@ -260,10 +261,10 @@ class Xophz_Compass_Bazaar_Admin_Sales{
     global $wpdb;
     $args = $_REQUEST;
 
-    $_SESSION['sales_month'] = $args['date'];
-    $_SESSION['sales_status'] = $args['status'];
-    $_SESSION['sales_sku'] = $args['sku'];
-    $_SESSION['sales_sku_scope'] = $args['sku_scope'];
+    $settings['month'] = $args['date'];
+    $settings['status'] = $args['status'];
+    $settings['sku'] = $args['sku'];
+    $settings['sku_scope'] = $args['sku_scope'];
 
     // output headers so that the file is downloaded rather than displayed
     header("Cache-Control: public");
@@ -276,7 +277,7 @@ class Xophz_Compass_Bazaar_Admin_Sales{
 
     // create a file pointer connected to the output stream
     $output = fopen('php://output', 'w');
-    $sql = Xophz_Compass_Bazaar_Admin_Sales::getMonthlyReportSql();
+    $sql = Xophz_Compass_Bazaar_Admin_Sales::getMonthlyReportSql($settings);
 
     $results = $wpdb->get_results($sql);
 
@@ -310,22 +311,22 @@ class Xophz_Compass_Bazaar_Admin_Sales{
    *
    * @return void
    */
-  public function getMonthlyReportSql()
+  public function getMonthlyReportSql($settings)
   {
     global $wpdb;
 
-    $thisMonth  = $_SESSION['sales_month'] . "-01"; 
+    $thisMonth  = $settings['month'] . "-01"; 
 
     $date = new DateTime($thisMonth);
     $date->modify('first day of next month');
     $nextMonth = $date->format('Y-m-d');
 
-    $sku = $_SESSION['sales_sku']; 
+    $sku = $settings['sku']; 
 
-    $status = implode("','wc-", $_SESSION['sales_status']);
+    $status = implode("','wc-", $settings['status']);
 
     if($sku){
-      switch( $_SESSION['sales_sku_scope'] ){
+      switch( $settings['sku_scope'] ){
         case 'contain':
           $sku = "LIKE '%{$sku}%'";
         break;
@@ -344,6 +345,8 @@ class Xophz_Compass_Bazaar_Admin_Sales{
       }
       $sku = " WHERE pm.meta_value {$sku} ";
     }
+
+    $gmt = $settings['gmt'] ? '_gmt' : '';
 
     $sql = "
       Select
@@ -386,10 +389,10 @@ class Xophz_Compass_Bazaar_Admin_Sales{
           {$wpdb->prefix}woocommerce_order_itemmeta as oim on 	oi.order_item_id = oim.order_item_id
         WHERE 
           (
-            ( p.post_date_gmt BETWEEN '{$thisMonth}' AND '{$nextMonth}' ) 
+            ( p.post_date{$gmt} BETWEEN '{$thisMonth}' AND '{$nextMonth}' ) 
             OR
             (
-              p.post_modified_gmt BETWEEN '{$thisMonth}' AND '{$nextMonth}'
+              p.post_modified{$gmt} BETWEEN '{$thisMonth}' AND '{$nextMonth}'
               AND
               p.post_type = 'shop_order_refund'
             )
