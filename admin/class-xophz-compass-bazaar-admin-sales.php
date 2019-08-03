@@ -417,7 +417,6 @@ class Xophz_Compass_Bazaar_Admin_Sales{
         Sales DESC
 
     ";
-    echo $sql;
     return $sql;
 
   }
