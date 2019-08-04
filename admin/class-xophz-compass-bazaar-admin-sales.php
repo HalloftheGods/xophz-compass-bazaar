@@ -411,7 +411,7 @@ class Xophz_Compass_Bazaar_Admin_Sales{
       {$sku}
 
       GROUP BY
-        SKUID
+        SKU
       ORDER BY 
         Sales DESC
 
