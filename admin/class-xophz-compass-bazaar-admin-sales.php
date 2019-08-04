@@ -278,8 +278,8 @@ class Xophz_Compass_Bazaar_Admin_Sales{
     $results = $wpdb->get_results($sql);
 
     $columns = [
-      'SKU',
       'Product',
+      'SKU',
       'Sold',
       'Gross',
       'Discount',
