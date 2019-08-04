@@ -217,7 +217,7 @@ class Xophz_Compass_Bazaar_Admin_Sales{
           400
         );
 
-      $settings['month'] = $args->date;
+      $settings['date'] = $args->date;
       $settings['status'] = $args->status;
       $settings['sku'] = $args->sku;
       $settings['sku_scope'] = $args->sku_scope;
@@ -259,13 +259,8 @@ class Xophz_Compass_Bazaar_Admin_Sales{
   public function exportMonthlySalesReport()
   {
     global $wpdb;
+
     $args = $_REQUEST;
-
-    $settings['month'] = $args['date'];
-    $settings['status'] = $args['status'];
-    $settings['sku'] = $args['sku'];
-    $settings['sku_scope'] = $args['sku_scope'];
-
     // output headers so that the file is downloaded rather than displayed
     header("Cache-Control: public");
     header("Content-Description: File Transfer");
@@ -273,11 +268,12 @@ class Xophz_Compass_Bazaar_Admin_Sales{
     header('Content-Disposition: attachment; filename=data.csv');
     header("Content-Transfer-Encoding: binary");
     header("Content-Type: binary/octet-stream");
-    header("Content-Name: data.csv");
+    header("Content-Name: {$args['filename']}");
 
     // create a file pointer connected to the output stream
     $output = fopen('php://output', 'w');
-    $sql = Xophz_Compass_Bazaar_Admin_Sales::getMonthlyReportSql($settings);
+
+    $sql = Xophz_Compass_Bazaar_Admin_Sales::getMonthlyReportSql($args);
 
     $results = $wpdb->get_results($sql);
 
@@ -315,7 +311,7 @@ class Xophz_Compass_Bazaar_Admin_Sales{
   {
     global $wpdb;
 
-    $thisMonth  = $settings['month'] . "-01"; 
+    $thisMonth  = $settings['date'] . "-01"; 
 
     $date = new DateTime($thisMonth);
     $date->modify('first day of next month');
