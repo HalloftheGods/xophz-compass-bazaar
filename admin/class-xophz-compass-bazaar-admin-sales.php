@@ -278,14 +278,14 @@ class Xophz_Compass_Bazaar_Admin_Sales{
     $results = $wpdb->get_results($sql);
 
     $columns = [
+      'SKU',
       'Product',
-      'SKUID',
-      'Price',
-      'Stock',
       'Sold',
       'Gross',
       'Discount',
       'Sales',
+      'PriceTag',
+      'Stock',
       'StockValue',
     ];
 
@@ -344,16 +344,17 @@ class Xophz_Compass_Bazaar_Admin_Sales{
 
     $gmt = $settings['gmt'] ? '_gmt' : '';
 
+    // max( CASE WHEN oim.meta_key = 'SKU' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as sku,
     $sql = "
       Select
         itemName as Product,
-        pm.meta_value as SKUID,
+        pm.meta_value as SKU,
         sum(Qty) as Sold,
         sum(( (Qty * pm3.meta_value) )) as Gross,
         sum(( (Qty * pm3.meta_value) - lineTotal) ) as Discount,
         sum(lineTotal) as Sales,
         pm2.meta_value as Stock,
-        pm3.meta_value as Price,
+        pm3.meta_value as PriceTag,
         (pm2.meta_value * pm3.meta_value) as StockValue
       FROM
       (
@@ -369,7 +370,6 @@ class Xophz_Compass_Bazaar_Admin_Sales{
             oi.order_item_name as itemName,
             oi.order_item_type as itemType,
             max( CASE WHEN oim.meta_key = '_product_id' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as productID, 
-            max( CASE WHEN oim.meta_key = 'SKU' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as SKU,
             max( CASE WHEN oim.meta_key = '_qty' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as Qty,
             max( CASE WHEN oim.meta_key = '_variation_id' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as variationID,
             max( CASE WHEN oim.meta_key = '_line_total' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as lineTotal,
