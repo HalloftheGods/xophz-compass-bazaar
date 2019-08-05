@@ -260,12 +260,12 @@ class Xophz_Compass_Bazaar_Admin_Sales{
   {
     global $wpdb;
 
-    $args = $_GET;
+    $args = $_REQUEST;
     // output headers so that the file is downloaded rather than displayed
     header("Cache-Control: public");
     header("Content-Description: File Transfer");
     header('Content-Type: text/csv; charset=utf-8');
-    header('Content-Disposition: attachment; filename=data.csv');
+    header("Content-Disposition: attachment; filename={$args['filename']}");
     header("Content-Transfer-Encoding: binary");
     header("Content-Type: binary/octet-stream");
     header("Content-Name: {$args['filename']}");
