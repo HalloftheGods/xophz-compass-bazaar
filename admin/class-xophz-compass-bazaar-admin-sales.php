@@ -260,7 +260,7 @@ class Xophz_Compass_Bazaar_Admin_Sales{
   {
     global $wpdb;
 
-    $args = $_REQUEST;
+    $args = $_GET;
     // output headers so that the file is downloaded rather than displayed
     header("Cache-Control: public");
     header("Content-Description: File Transfer");
