@@ -120,13 +120,19 @@ class Xophz_Compass_Bazaar_Admin_Reports{
     $orders = array_map('intval', array_column($results,'total_orders'));
     $shipping = array_map('intval', array_column($results,'total_shipping'));
 
+    $total_orders = array_sum($orders);
+    $total_shipping = array_sum($shipping);
+
+    array_pop($labels);
+    array_pop($orders);
+
     Xophz_Compass::output_json([
       'sparkline' =>  [
         'labels' => $labels,
         'value' => $orders
       ],
-      'total_orders'        => array_sum($orders),
-      'total_shipping'      => array_sum($shipping),
+      'total_orders'        => $total_orders,
+      'total_shipping'      => $total_shipping,
     ]);
   }
   public function getTotalUsers(){
@@ -152,12 +158,17 @@ class Xophz_Compass_Bazaar_Admin_Reports{
     $labels = array_column($results,'month');
     $users = array_map('intval', array_column($results,'total_users'));
 
+    $total_users = array_sum($users);
+
+    array_pop($labels);
+    array_pop($users);
+
     Xophz_Compass::output_json([
       'sparkline' =>  [
         'labels' => $labels,
         'value' => $users
       ],
-      'total_users'        => array_sum($users),
+      'total_users'        => $total_users,
     ]);
   }
 
@@ -186,13 +197,19 @@ class Xophz_Compass_Bazaar_Admin_Reports{
     $views = array_map('intval', array_column($results,'total_views'));
     $posts = array_map('intval', array_column($results,'total_posts'));
 
+    $total_views = array_sum($views);
+    $total_posts = array_sum($posts);
+
+    array_pop($labels);
+    array_pop($views);
+
     Xophz_Compass::output_json([
       'sparkline' =>  [
         'labels' => $labels,
         'value' => $views
       ],
-      'total_views'        => array_sum($views),
-      'total_posts'        => array_sum($posts),
+      'total_views'        => $total_views,
+      'total_posts'        => $total_posts,
     ]);
   }
 
@@ -225,6 +242,11 @@ class Xophz_Compass_Bazaar_Admin_Reports{
 
     $years = array_column($results,'month');
     $totals = array_map('intval', array_column($results,'total_sales'));
+
+    $total_sales = array_sum($totals);
+
+    array_pop($labels);
+    array_pop($totals);
 
     Xophz_Compass::output_json([
       'sparkline' =>  [
