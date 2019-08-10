@@ -132,6 +132,7 @@ class Xophz_Compass_Bazaar_Admin {
     ]);
   }
 
+
   public function getProductsStats(){
     $args = Xophz_Compass::get_input_json();
 
