@@ -188,7 +188,7 @@ class Xophz_Compass_Bazaar_Admin {
     ]);
   }
 
-  public function getProductIds($args){
+  public static function getProductIds($args){
     $posts = ($args->filters) 
       ? Xophz_Compass_Bazaar_Admin::getPostIdsByFilters( $args->filters ) : [];
 
@@ -209,7 +209,7 @@ class Xophz_Compass_Bazaar_Admin {
     return wc_get_products( array_merge($default, (array) $args) );
   } 
 
-  public function getProductsDataByIds($ids){
+  public static function getProductsDataByIds($ids){
     $products = [];
     foreach($ids as $i => $id){
       $p = new WC_Product($id);
@@ -255,7 +255,7 @@ class Xophz_Compass_Bazaar_Admin {
     ];
   }
 
-  public function getPostIdsByTitle($title){
+  public static function getPostIdsByTitle($title){
     global $wpdb;
     return $wpdb->get_col("
       SELECT id FROM {$wpdb->posts}  
@@ -263,7 +263,7 @@ class Xophz_Compass_Bazaar_Admin {
     ");
   }
 
-  public function getPostIdsBySku($sku){
+  public static function getPostIdsBySku($sku){
     global $wpdb;
     return $wpdb->get_col("
       SELECT post_id FROM {$wpdb->postmeta}  
@@ -271,7 +271,7 @@ class Xophz_Compass_Bazaar_Admin {
     ");
   }
 
-  public function getProductIdsByPostIds($ids){
+  public static function getProductIdsByPostIds($ids){
     $productIds = [];
     foreach($ids as $id){
       array_push($productIds, wc_get_product($id)->get_parent_id());
@@ -279,7 +279,7 @@ class Xophz_Compass_Bazaar_Admin {
     return $productIds;
   }
 
-  public function getPostIdsByFilters($filters){
+  public static function getPostIdsByFilters($filters){
     $posts = [];
     $postIdsByTitle = $postIdsBySku = $productIdsByPostIds = [];
 
