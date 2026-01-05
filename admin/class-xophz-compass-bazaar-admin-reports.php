@@ -23,6 +23,7 @@
 if(function_exists('WC')){
   include_once( WC()->plugin_path() . '/includes/admin/reports/class-wc-admin-report.php' );
   include_once( WC()->plugin_path() . '/includes/admin/reports/class-wc-report-sales-by-date.php' );
+  include_once( WC()->plugin_path() . '/includes/admin/class-wc-admin-reports.php' );
 }
 
 
@@ -245,7 +246,7 @@ class Xophz_Compass_Bazaar_Admin_Reports{
 
     $total_sales = array_sum($totals);
 
-    array_pop($labels);
+    array_pop($years);
     array_pop($totals);
 
     Xophz_Compass::output_json([
@@ -253,7 +254,7 @@ class Xophz_Compass_Bazaar_Admin_Reports{
         'labels' => $years,
         'value' => $totals
       ],
-      'total_sales'        => array_sum($totals)
+      'total_sales'        => $total_sales
     ]);
   }
 
@@ -266,6 +267,10 @@ class Xophz_Compass_Bazaar_Admin_Reports{
   }
   
   public function getReports(){
+    if (!class_exists('WC_Admin_Reports')) {
+       Xophz_Compass::output_json(['reports' => []]);
+       return;
+    }
     $reports = new WC_Admin_Reports();
     Xophz_Compass::output_json([
       'reports'        => $reports->get_reports()

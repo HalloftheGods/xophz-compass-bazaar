@@ -67,11 +67,11 @@ class Xophz_Compass_Bazaar_Admin_Orders {
       return $order->get_data();
     };
 
-    $orders = array_map( $mapOrderData, $orderIds->orders );
+    $orders_data = array_map( $mapOrderData, $orderIds->orders );
 
     Xophz_Compass::output_json([
-      'total_count' => (int) $orders->total, 
-      'data'        => $orders
+      'total_count' => (int) $orderIds->total, 
+      'data'        => $orders_data
     ]);
   }
   /**
@@ -112,7 +112,7 @@ class Xophz_Compass_Bazaar_Admin_Orders {
     ]);
   }
 
-  public function getOrderIds($args){
+  public static function getOrderIds($args){
     $default = [
       'return'    => 'ids',
       'paginate'  => true

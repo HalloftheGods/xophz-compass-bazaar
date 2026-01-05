@@ -67,6 +67,16 @@ class Xophz_Compass_Bazaar_Admin_Sales{
 
       $remaining_stock = 0;
       $unique_in_stock = [];
+      $in_stock_value = 0;
+      $subtotal = 0;
+      $total_sales = 0;
+      $discount = 0;
+      $total_tax = 0;
+      $total_qty = 0;
+      $total_items_sold = 0;
+      $shipping = 0;
+      $sales = 0;
+      $items = [];
 
       foreach($orders as $id){
         $o = wc_get_order($id);
@@ -91,7 +101,7 @@ class Xophz_Compass_Bazaar_Admin_Sales{
                     $skip = true;
                   break;
                 case "end":
-                  if( substr( $sku, -strlen($args->sku) ) !== $arks->sku )
+                  if( substr( $sku, -strlen($args->sku) ) !== $args->sku )
                     $skip = true;
                   break;
                 case "contain":

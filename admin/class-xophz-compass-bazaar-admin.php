@@ -123,11 +123,19 @@ class Xophz_Compass_Bazaar_Admin {
 
   public function getProducts(){
     $args = Xophz_Compass::get_input_json();
+    if (!$args) $args = new stdClass();
+    
     $wc_products = Xophz_Compass_Bazaar_Admin::getProductIds( $args );
-    $products = Xophz_Compass_Bazaar_Admin::getProductsDataByIds( $wc_products->products );
+    
+    if (!$wc_products) {
+       Xophz_Compass::output_json(['total_count' => 0, 'data' => []]);
+       return;
+    }
+
+    $products = Xophz_Compass_Bazaar_Admin::getProductsDataByIds( isset($wc_products->products) ? $wc_products->products : [] );
 
     Xophz_Compass::output_json([
-      'total_count' => $wc_products->total,
+      'total_count' => isset($wc_products->total) ? $wc_products->total : 0,
       'data' => $products
     ]);
   }
@@ -141,37 +149,31 @@ class Xophz_Compass_Bazaar_Admin {
 
     $wc_products = Xophz_Compass_Bazaar_Admin::getPostIdsBySku( $args->filters->sku ); 
 
-    // Xophz_Compass_Bazaar_Admin::getPostIdsByFilters( $args->filters );
-    // $total_stock = 0;
-
     $unique_in_stock = 0;
     $stock_value = 0;
+    $total_stock = 0;
+    $in_stock_value = 0;
+    $avg_discount = 0;
+    $est_discount = 0;
+    $total_sales = 0;
+    $est_sales = 0;
 
-    $qtys = [];
-
-    foreach($wc_products as $product){
-      $product = wc_get_product($product);
+    foreach($wc_products as $product_id){
+      $product = wc_get_product($product_id);
+      if (!$product) continue;
 
       $price = $product->get_price();
-      // $price = $product->is_on_sale() 
-      //   ? $product->get_sale_price()
-      //   : $product->get_regulprice();
 
       if ( $product->managing_stock() && $product->is_in_stock() ){
         $unique_in_stock++;
-
-        $total_stock = $total_stock + $product->get_stock_quantity();
-
-        $qtys[] = $product->get_stock_quantity();
-
-        $in_stock_value = $in_stock_value 
-          + ( $product->get_stock_quantity() * $price );
+        $total_stock += $product->get_stock_quantity();
+        $in_stock_value += ( $product->get_stock_quantity() * $price );
       }
+      
+      $total_sales += $product->get_total_sales();
 
       unset($product);
     }
-
-    // $wc_products = Xophz_Compass_Bazaar_Admin::getProductIds( $args );
 
     Xophz_Compass::output_json([
       'data' => [
@@ -189,7 +191,7 @@ class Xophz_Compass_Bazaar_Admin {
   }
 
   public static function getProductIds($args){
-    $posts = ($args->filters) 
+    $posts = (!empty($args->filters)) 
       ? Xophz_Compass_Bazaar_Admin::getPostIdsByFilters( $args->filters ) : [];
 
     $default = [
