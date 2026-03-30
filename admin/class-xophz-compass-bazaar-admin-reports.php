@@ -20,14 +20,19 @@
  * @subpackage Xophz_Compass_Bazaar/admin
  * @author     Your Name <email@example.com>
  */
-if(function_exists('WC')){
-  include_once( WC()->plugin_path() . '/includes/admin/reports/class-wc-admin-report.php' );
-  include_once( WC()->plugin_path() . '/includes/admin/reports/class-wc-report-sales-by-date.php' );
-  include_once( WC()->plugin_path() . '/includes/admin/class-wc-admin-reports.php' );
-}
-
 
 class Xophz_Compass_Bazaar_Admin_Reports{
+  /**
+   * Load required WooCommerce report classes.
+   */
+  private function load_wc_dependencies() {
+    if ( function_exists( 'WC' ) ) {
+      include_once( WC()->plugin_path() . '/includes/admin/reports/class-wc-admin-report.php' );
+      include_once( WC()->plugin_path() . '/includes/admin/reports/class-wc-report-sales-by-date.php' );
+      include_once( WC()->plugin_path() . '/includes/admin/class-wc-admin-reports.php' );
+    }
+  }
+
   /**
   * The ID of this plugin.
   *
@@ -69,6 +74,7 @@ class Xophz_Compass_Bazaar_Admin_Reports{
   }
 
   public function getSalesSparkline(){
+    $this->load_wc_dependencies();
     $args   = Xophz_Compass::get_input_json();
 
     // $reports = new WC_Admin_Reports();
@@ -259,6 +265,7 @@ class Xophz_Compass_Bazaar_Admin_Reports{
   }
 
   public function getReport(){
+    $this->load_wc_dependencies();
     $reports = new WC_Admin_Reports();
     $args   = Xophz_Compass::get_input_json();
     Xophz_Compass::output_json([
@@ -267,6 +274,7 @@ class Xophz_Compass_Bazaar_Admin_Reports{
   }
   
   public function getReports(){
+    $this->load_wc_dependencies();
     if (!class_exists('WC_Admin_Reports')) {
        Xophz_Compass::output_json(['reports' => []]);
        return;

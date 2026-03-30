@@ -78,7 +78,7 @@ function run_xophz_compass_bazaar() {
     include_once( ABSPATH . 'wp-admin/includes/plugin.php' );
   }
   if ( !is_plugin_active( 'xophz-compass/xophz-compass.php' ) ) {
-    add_action( 'admin_init', 'shutoff_xophz_compass_bazaar' );
+    // add_action( 'admin_init', 'shutoff_xophz_compass_bazaar' );
     add_action( 'admin_notices', 'admin_notice_xophz_compass_bazaar' );
 
     function shutoff_xophz_compass_bazaar() {
