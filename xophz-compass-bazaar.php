@@ -13,7 +13,7 @@
  * @package           Xophz_Compass_Bazaar
  *
  * @wordpress-plugin
- * Category:          Targeting
+ * Category:          Trajectory
  * Plugin Name:       Xophz Bazaar Foresight
  * Plugin URI:        https://www.mycompassconsulting.com/bazaar/
  * Description:       This supercharged UI helps you quickly manage your woocommerce inventory, orders, and view sales data in real time.
