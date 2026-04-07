@@ -73,20 +73,20 @@ require plugin_dir_path( __FILE__ ) . 'includes/class-xophz-compass-bazaar.php';
  *
  * @since    1.0.0
  */
-function run_xophz_compass_bazaar() { 
-  if( !function_exists('is_plugin_active') ) {
-    include_once( ABSPATH . 'wp-admin/includes/plugin.php' );
-  }
-  if ( !is_plugin_active( 'xophz-compass/xophz-compass.php' ) ) {
-    // add_action( 'admin_init', 'shutoff_xophz_compass_bazaar' );
+function run_xophz_compass_bazaar() {
+  if ( ! class_exists( 'Xophz_Compass' ) ) {
+    add_action( 'admin_init', 'shutoff_xophz_compass_bazaar' );
     add_action( 'admin_notices', 'admin_notice_xophz_compass_bazaar' );
 
     function shutoff_xophz_compass_bazaar() {
+      if ( ! function_exists( 'deactivate_plugins' ) ) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+      }
       deactivate_plugins( plugin_basename( __FILE__ ) );
     }
 
     function admin_notice_xophz_compass_bazaar() {
-      echo '<div class="error"><h2><strong>Xophz_Compass_Bazaar</strong> requires Compass to run. It has self <strong>deactivated</strong>.</h2></div>';
+      echo '<div class="error"><h2><strong>Xophz Bazaar Foresight</strong> requires Compass to run. It has self <strong>deactivated</strong>.</h2></div>';
       if ( isset( $_GET['activate'] ) )
         unset( $_GET['activate'] );
     }
@@ -94,6 +94,5 @@ function run_xophz_compass_bazaar() {
     $plugin = new Xophz_Compass_Bazaar();
     $plugin->run();
   }
-  
 }
-run_xophz_compass_bazaar();
+add_action( 'plugins_loaded', 'run_xophz_compass_bazaar' );
