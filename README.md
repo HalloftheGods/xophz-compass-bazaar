@@ -25,7 +25,7 @@ A supercharged UI for managing WooCommerce inventory, orders, and viewing sales 
 1. Ensure **Xophz COMPASS** and **WooCommerce** are installed and active.
 2. Upload `xophz-compass-bazaar` to `/wp-content/plugins/`.
 3. Activate through the Plugins menu.
-4. Access via the COMPASS dashboard → **Bazaar**.
+4. Access via the My Compass dashboard → **Bazaar**.
 
 ## Frontend Routes
 
