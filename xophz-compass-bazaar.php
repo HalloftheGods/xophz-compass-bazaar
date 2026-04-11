@@ -17,7 +17,7 @@
  * Plugin Name:       Xophz Bazaar Foresight
  * Plugin URI:        https://www.mycompassconsulting.com/bazaar/
  * Description:       This supercharged UI helps you quickly manage your woocommerce inventory, orders, and view sales data in real time.
- * Version:           1.0.0
+ * Version:           26.4.11
  * Author:            Hall of the Gods, Inc.
  * Author URI:        http://example.com/
  * License:           GPL-2.0+
@@ -36,7 +36,7 @@ if ( ! defined( 'WPINC' ) ) {
  * Start at version 1.0.0 and use SemVer - https://semver.org
  * Rename this for your plugin and update it as you release new versions.
  */
-define( 'XOPHZ_COMPASS_BAZAAR_VERSION', '1.0.0' );
+define( 'XOPHZ_COMPASS_BAZAAR_VERSION', '26.4.11' );
 
 /**
  * The code that runs during plugin activation.
