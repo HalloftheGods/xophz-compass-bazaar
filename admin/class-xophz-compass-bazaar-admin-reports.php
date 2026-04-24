@@ -92,36 +92,54 @@ class Xophz_Compass_Bazaar_Admin_Reports{
 
   public function getTotalOrders(){
     global $wpdb;
-    $results = $wpdb->get_results("
-      SELECT 
-        MONTHNAME(post_date) as month, 
-        SUM(meta.meta_value) AS total_shipping, 
-        COUNT(posts.ID) AS total_orders
-      FROM 
-        {$wpdb->posts} AS posts
-      LEFT JOIN 
-        {$wpdb->postmeta} AS meta 
-        ON 
-          posts.ID = meta.post_id
-      LEFT JOIN 
-        {$wpdb->term_relationships} AS rel 
-        ON 
-          posts.ID=rel.object_ID
-      LEFT JOIN 
-        {$wpdb->term_taxonomy} AS tax 
-        USING( term_taxonomy_id )
-      LEFT JOIN 
-        {$wpdb->terms} AS term 
-        USING( term_id )
-      WHERE 
-        meta.meta_key = '_order_shipping'
-        AND 
-        posts.post_type = 'shop_order'
-        AND 
-        post_date > DATE_SUB(now(), INTERVAL 6 MONTH)
-      GROUP BY 
-        YEAR(post_date), MONTH(post_date)
-    ");
+
+    $hpos_enabled = class_exists('\Automattic\WooCommerce\Utilities\OrderUtil') && \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled();
+
+    if ( $hpos_enabled ) {
+      $results = $wpdb->get_results("
+        SELECT 
+          MONTHNAME(date_created_gmt) as month, 
+          SUM(shipping_amount) AS total_shipping, 
+          COUNT(id) AS total_orders
+        FROM 
+          {$wpdb->prefix}wc_orders
+        WHERE 
+          date_created_gmt > DATE_SUB(now(), INTERVAL 6 MONTH)
+        GROUP BY 
+          YEAR(date_created_gmt), MONTH(date_created_gmt)
+      ");
+    } else {
+      $results = $wpdb->get_results("
+        SELECT 
+          MONTHNAME(post_date) as month, 
+          SUM(meta.meta_value) AS total_shipping, 
+          COUNT(posts.ID) AS total_orders
+        FROM 
+          {$wpdb->posts} AS posts
+        LEFT JOIN 
+          {$wpdb->postmeta} AS meta 
+          ON 
+            posts.ID = meta.post_id
+        LEFT JOIN 
+          {$wpdb->term_relationships} AS rel 
+          ON 
+            posts.ID=rel.object_ID
+        LEFT JOIN 
+          {$wpdb->term_taxonomy} AS tax 
+          USING( term_taxonomy_id )
+        LEFT JOIN 
+          {$wpdb->terms} AS term 
+          USING( term_id )
+        WHERE 
+          meta.meta_key = '_order_shipping'
+          AND 
+          posts.post_type = 'shop_order'
+          AND 
+          post_date > DATE_SUB(now(), INTERVAL 6 MONTH)
+        GROUP BY 
+          YEAR(post_date), MONTH(post_date)
+      ");
+    }
 
     $labels = array_column($results,'month');
     $orders = array_map('intval', array_column($results,'total_orders'));
@@ -222,30 +240,52 @@ class Xophz_Compass_Bazaar_Admin_Reports{
 
   public function getTotalSales() {
     global $wpdb;
-    $results = apply_filters( 'woocommerce_reports_sales_overview_order_totals', $wpdb->get_results("
-      SELECT 
-        MONTHNAME(post_date) as month, 
-        SUM(meta.meta_value) AS total_sales, 
-        COUNT(posts.ID) AS total_orders 
-      FROM 
-        {$wpdb->posts} AS posts
-      LEFT JOIN 
-        {$wpdb->postmeta} AS meta 
-      ON 
-        posts.ID = meta.post_id
-      WHERE 
-        meta.meta_key = '_order_total'
-        AND 
-        posts.post_type = 'shop_order'
-        AND 
-        posts.post_status IN ( '" 
-          . implode( "','", array( 'wc-completed', 'wc-processing', 'wc-refunded' ) ) . "' 
-        )
-        AND 
-        post_date > DATE_SUB(now(), INTERVAL 6 MONTH)
-      GROUP BY 
-        YEAR(post_date), MONTH(post_date)
-    "));
+    
+    $hpos_enabled = class_exists('\Automattic\WooCommerce\Utilities\OrderUtil') && \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled();
+
+    if ( $hpos_enabled ) {
+      $results = apply_filters( 'woocommerce_reports_sales_overview_order_totals', $wpdb->get_results("
+        SELECT 
+          MONTHNAME(date_created_gmt) as month, 
+          SUM(total_amount) AS total_sales, 
+          COUNT(id) AS total_orders 
+        FROM 
+          {$wpdb->prefix}wc_orders
+        WHERE 
+          status IN ( '" 
+            . implode( "','", array( 'wc-completed', 'wc-processing', 'wc-refunded' ) ) . "' 
+          )
+          AND 
+          date_created_gmt > DATE_SUB(now(), INTERVAL 6 MONTH)
+        GROUP BY 
+          YEAR(date_created_gmt), MONTH(date_created_gmt)
+      "));
+    } else {
+      $results = apply_filters( 'woocommerce_reports_sales_overview_order_totals', $wpdb->get_results("
+        SELECT 
+          MONTHNAME(post_date) as month, 
+          SUM(meta.meta_value) AS total_sales, 
+          COUNT(posts.ID) AS total_orders 
+        FROM 
+          {$wpdb->posts} AS posts
+        LEFT JOIN 
+          {$wpdb->postmeta} AS meta 
+        ON 
+          posts.ID = meta.post_id
+        WHERE 
+          meta.meta_key = '_order_total'
+          AND 
+          posts.post_type = 'shop_order'
+          AND 
+          posts.post_status IN ( '" 
+            . implode( "','", array( 'wc-completed', 'wc-processing', 'wc-refunded' ) ) . "' 
+          )
+          AND 
+          post_date > DATE_SUB(now(), INTERVAL 6 MONTH)
+        GROUP BY 
+          YEAR(post_date), MONTH(post_date)
+      "));
+    }
 
     $years = array_column($results,'month');
     $totals = array_map('intval', array_column($results,'total_sales'));

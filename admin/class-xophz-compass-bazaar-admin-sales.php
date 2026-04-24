@@ -354,6 +354,15 @@ class Xophz_Compass_Bazaar_Admin_Sales{
 
     $gmt = $settings['gmt'] ? '_gmt' : '';
 
+    $hpos_enabled = class_exists('\Automattic\WooCommerce\Utilities\OrderUtil') && \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled();
+
+    $orders_table = $hpos_enabled ? "{$wpdb->prefix}wc_orders" : "{$wpdb->posts}";
+    $date_col = $hpos_enabled ? "date_created{$gmt}" : "post_date{$gmt}";
+    $modified_col = $hpos_enabled ? "date_updated{$gmt}" : "post_modified{$gmt}";
+    $type_col = $hpos_enabled ? "type" : "post_type";
+    $status_col = $hpos_enabled ? "status" : "post_status";
+    $order_id_col = $hpos_enabled ? "id" : "ID";
+
     // max( CASE WHEN oim.meta_key = 'SKU' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as sku,
     $sql = "
       Select
@@ -388,29 +397,29 @@ class Xophz_Compass_Bazaar_Admin_Sales{
             max( CASE WHEN oim.meta_key = '_tax_class' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as taxClass,
             max( CASE WHEN oim.meta_key = '_line_subtotal' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as subtotal
         FROM
-          {$wpdb->posts} p 
+          {$orders_table} p 
           LEFT JOIN 
-          {$wpdb->prefix}woocommerce_order_items oi on p.ID = oi.order_id		
+          {$wpdb->prefix}woocommerce_order_items oi on p.{$order_id_col} = oi.order_id		
           LEFT JOIN 
           {$wpdb->prefix}woocommerce_order_itemmeta as oim on 	oi.order_item_id = oim.order_item_id
         WHERE 
           (
             ( 
-              p.post_date{$gmt} BETWEEN '{$thisMonth}' AND '{$nextMonth}' 
+              p.{$date_col} BETWEEN '{$thisMonth}' AND '{$nextMonth}' 
             ) 
             OR
             (
-              p.post_modified{$gmt} BETWEEN '{$thisMonth}' AND '{$nextMonth}'
+              p.{$modified_col} BETWEEN '{$thisMonth}' AND '{$nextMonth}'
               AND
-              p.post_type = 'shop_order_refund'
+              p.{$type_col} = 'shop_order_refund'
             )
           )
         AND
-          p.post_status in ('wc-{$status}')
+          p.{$status_col} in ('wc-{$status}')
         GROUP BY
           oi.order_item_id 
         ORDER BY 
-          p.post_date DESC
+          p.{$date_col} DESC
         ) sales 
       ) sales
       JOIN 

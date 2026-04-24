@@ -60,6 +60,12 @@ function deactivate_xophz_compass_bazaar() {
 register_activation_hook( __FILE__, 'activate_xophz_compass_bazaar' );
 register_deactivation_hook( __FILE__, 'deactivate_xophz_compass_bazaar' );
 
+add_action( 'before_woocommerce_init', function() {
+  if ( class_exists( '\Automattic\WooCommerce\Utilities\FeaturesUtil' ) ) {
+    \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );
+  }
+} );
+
 /**
  * The core plugin class that is used to define internationalization,
  * admin-specific hooks, and public-facing site hooks.
