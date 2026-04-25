@@ -15,7 +15,7 @@
  * @wordpress-plugin
  * Category:          Command Deck
  * Plugin Name:       Xophz Bazaar Foresight
- * Plugin URI:        https://www.mycompassconsulting.com/bazaar/
+ * Plugin URI:        https://github.com/HalloftheGods/xophz-compass-bazaar
  * Description:       This supercharged UI helps you quickly manage your woocommerce inventory, orders, and view sales data in real time.
  * Version:           26.4.24.494
  * Author:            Hall of the Gods, Inc.
