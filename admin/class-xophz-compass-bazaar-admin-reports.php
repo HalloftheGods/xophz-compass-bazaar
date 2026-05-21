@@ -98,46 +98,39 @@ class Xophz_Compass_Bazaar_Admin_Reports{
     if ( $hpos_enabled ) {
       $results = $wpdb->get_results("
         SELECT 
-          MONTHNAME(date_created_gmt) as month, 
-          SUM(shipping_amount) AS total_shipping, 
-          COUNT(id) AS total_orders
+          MONTHNAME(o.date_created_gmt) as month, 
+          SUM(m.meta_value) AS total_shipping, 
+          COUNT(DISTINCT o.id) AS total_orders
         FROM 
-          {$wpdb->prefix}wc_orders
+          {$wpdb->prefix}wc_orders o
+        LEFT JOIN
+          {$wpdb->prefix}wc_orders_meta m
+          ON o.id = m.order_id AND m.meta_key = '_order_shipping'
         WHERE 
-          date_created_gmt > DATE_SUB(now(), INTERVAL 6 MONTH)
+          o.date_created_gmt > DATE_SUB(now(), INTERVAL 6 MONTH)
         GROUP BY 
-          YEAR(date_created_gmt), MONTH(date_created_gmt)
+          YEAR(o.date_created_gmt), MONTH(o.date_created_gmt)
+        ORDER BY YEAR(o.date_created_gmt) ASC, MONTH(o.date_created_gmt) ASC
       ");
     } else {
       $results = $wpdb->get_results("
         SELECT 
-          MONTHNAME(post_date) as month, 
+          MONTHNAME(posts.post_date) as month, 
           SUM(meta.meta_value) AS total_shipping, 
-          COUNT(posts.ID) AS total_orders
+          COUNT(DISTINCT posts.ID) AS total_orders
         FROM 
           {$wpdb->posts} AS posts
         LEFT JOIN 
           {$wpdb->postmeta} AS meta 
           ON 
-            posts.ID = meta.post_id
-        LEFT JOIN 
-          {$wpdb->term_relationships} AS rel 
-          ON 
-            posts.ID=rel.object_ID
-        LEFT JOIN 
-          {$wpdb->term_taxonomy} AS tax 
-          USING( term_taxonomy_id )
-        LEFT JOIN 
-          {$wpdb->terms} AS term 
-          USING( term_id )
+            posts.ID = meta.post_id AND meta.meta_key = '_order_shipping'
         WHERE 
-          meta.meta_key = '_order_shipping'
-          AND 
           posts.post_type = 'shop_order'
           AND 
-          post_date > DATE_SUB(now(), INTERVAL 6 MONTH)
+          posts.post_date > DATE_SUB(now(), INTERVAL 6 MONTH)
         GROUP BY 
-          YEAR(post_date), MONTH(post_date)
+          YEAR(posts.post_date), MONTH(posts.post_date)
+        ORDER BY YEAR(posts.post_date) ASC, MONTH(posts.post_date) ASC
       ");
     }
 
@@ -147,9 +140,6 @@ class Xophz_Compass_Bazaar_Admin_Reports{
 
     $total_orders = array_sum($orders);
     $total_shipping = array_sum($shipping);
-
-    array_pop($labels);
-    array_pop($orders);
 
     Xophz_Compass::output_json([
       'sparkline' =>  [
@@ -178,15 +168,13 @@ class Xophz_Compass_Bazaar_Admin_Reports{
         meta.meta_value > UNIX_TIMESTAMP(now() - INTERVAL 6 MONTH)
       GROUP BY 
         YEAR(FROM_UNIXTIME(meta.meta_value)), MONTH(FROM_UNIXTIME(meta.meta_value))
+      ORDER BY YEAR(FROM_UNIXTIME(meta.meta_value)) ASC, MONTH(FROM_UNIXTIME(meta.meta_value)) ASC
     ");
 
     $labels = array_column($results,'month');
     $users = array_map('intval', array_column($results,'total_users'));
 
     $total_users = array_sum($users);
-
-    array_pop($labels);
-    array_pop($users);
 
     Xophz_Compass::output_json([
       'sparkline' =>  [
@@ -215,7 +203,8 @@ class Xophz_Compass_Bazaar_Admin_Reports{
         AND 
         post_date > DATE_SUB(now(), INTERVAL 6 MONTH)
       GROUP BY 
-        YEAR(post_date), MONTH(post_date)
+        YEAR(posts.post_date), MONTH(posts.post_date)
+      ORDER BY YEAR(posts.post_date) ASC, MONTH(posts.post_date) ASC
     ");
 
     $labels = array_column($results,'month');
@@ -224,9 +213,6 @@ class Xophz_Compass_Bazaar_Admin_Reports{
 
     $total_views = array_sum($views);
     $total_posts = array_sum($posts);
-
-    array_pop($labels);
-    array_pop($views);
 
     Xophz_Compass::output_json([
       'sparkline' =>  [
@@ -259,31 +245,31 @@ class Xophz_Compass_Bazaar_Admin_Reports{
           date_created_gmt > DATE_SUB(now(), INTERVAL 6 MONTH)
         GROUP BY 
           YEAR(date_created_gmt), MONTH(date_created_gmt)
+        ORDER BY YEAR(date_created_gmt) ASC, MONTH(date_created_gmt) ASC
       "));
     } else {
       $results = apply_filters( 'woocommerce_reports_sales_overview_order_totals', $wpdb->get_results("
         SELECT 
-          MONTHNAME(post_date) as month, 
+          MONTHNAME(posts.post_date) as month, 
           SUM(meta.meta_value) AS total_sales, 
-          COUNT(posts.ID) AS total_orders 
+          COUNT(DISTINCT posts.ID) AS total_orders 
         FROM 
           {$wpdb->posts} AS posts
         LEFT JOIN 
           {$wpdb->postmeta} AS meta 
         ON 
-          posts.ID = meta.post_id
+          posts.ID = meta.post_id AND meta.meta_key = '_order_total'
         WHERE 
-          meta.meta_key = '_order_total'
-          AND 
           posts.post_type = 'shop_order'
           AND 
           posts.post_status IN ( '" 
             . implode( "','", array( 'wc-completed', 'wc-processing', 'wc-refunded' ) ) . "' 
           )
           AND 
-          post_date > DATE_SUB(now(), INTERVAL 6 MONTH)
+          posts.post_date > DATE_SUB(now(), INTERVAL 6 MONTH)
         GROUP BY 
-          YEAR(post_date), MONTH(post_date)
+          YEAR(posts.post_date), MONTH(posts.post_date)
+        ORDER BY YEAR(posts.post_date) ASC, MONTH(posts.post_date) ASC
       "));
     }
 
@@ -291,9 +277,6 @@ class Xophz_Compass_Bazaar_Admin_Reports{
     $totals = array_map('intval', array_column($results,'total_sales'));
 
     $total_sales = array_sum($totals);
-
-    array_pop($years);
-    array_pop($totals);
 
     Xophz_Compass::output_json([
       'sparkline' =>  [

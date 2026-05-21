@@ -140,6 +140,83 @@ class Xophz_Compass_Bazaar_Admin {
     ]);
   }
 
+  public function saveProduct() {
+    $args = Xophz_Compass::get_input_json();
+    if (!$args) {
+      Xophz_Compass::output_json(['success' => false, 'message' => 'Invalid payload']);
+      return;
+    }
+
+    $product = isset($args->id) && $args->id ? wc_get_product($args->id) : new WC_Product_Simple();
+    
+    if (!$product) {
+      Xophz_Compass::output_json(['success' => false, 'message' => 'Product not found']);
+      return;
+    }
+
+    if (isset($args->title)) $product->set_name($args->title);
+    if (isset($args->description)) $product->set_description($args->description);
+    if (isset($args->short_description)) $product->set_short_description($args->short_description);
+    if (isset($args->regular_price)) $product->set_regular_price($args->regular_price);
+    if (isset($args->sale_price)) $product->set_sale_price($args->sale_price);
+    if (isset($args->sku)) $product->set_sku($args->sku);
+    
+    if (isset($args->manage_stock) && $args->manage_stock) {
+      $product->set_manage_stock(true);
+      if (isset($args->stock_quantity)) $product->set_stock_quantity($args->stock_quantity);
+    } else {
+      $product->set_manage_stock(false);
+    }
+
+    if (isset($args->stock_status)) $product->set_stock_status($args->stock_status);
+    
+    if (isset($args->category_ids) && is_array($args->category_ids)) {
+      $product->set_category_ids($args->category_ids);
+    }
+
+    // Handle Image Upload from base64
+    if (!empty($args->image_data)) {
+      $upload_dir = wp_upload_dir();
+      $image_data = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $args->image_data));
+      $filename = 'product-image-' . time() . '.png';
+      $file_path = $upload_dir['path'] . '/' . $filename;
+      
+      file_put_contents($file_path, $image_data);
+      
+      $wp_filetype = wp_check_filetype($filename, null);
+      $attachment = array(
+          'post_mime_type' => $wp_filetype['type'],
+          'post_title'     => sanitize_file_name($filename),
+          'post_content'   => '',
+          'post_status'    => 'inherit'
+      );
+      
+      $attach_id = wp_insert_attachment($attachment, $file_path);
+      require_once(ABSPATH . 'wp-admin/includes/image.php');
+      $attach_data = wp_generate_attachment_metadata($attach_id, $file_path);
+      wp_update_attachment_metadata($attach_id, $attach_data);
+      
+      $product->set_image_id($attach_id);
+    }
+
+    if (!isset($args->id) || !$args->id) {
+      $product->set_status('publish');
+    }
+    
+    $product_id = $product->save();
+
+    if ($product_id) {
+      // Get full product data to return
+      $products = Xophz_Compass_Bazaar_Admin::getProductsDataByIds([$product_id]);
+      Xophz_Compass::output_json([
+        'success' => true,
+        'product' => isset($products[0]) ? $products[0] : null
+      ]);
+    } else {
+      Xophz_Compass::output_json(['success' => false, 'message' => 'Failed to save product']);
+    }
+  }
+
 
   public function updateProductStock(){
     $args = Xophz_Compass::get_input_json();
