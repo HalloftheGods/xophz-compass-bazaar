@@ -42,6 +42,7 @@ class Xophz_Compass_Bazaar_Admin_Orders {
   public  $action_hooks = [
     'wp_ajax_get_orders' => 'getOrders',
     'wp_ajax_get_categories' => 'getCategories',
+    'wp_ajax_create_pos_order' => 'createPosOrder',
   ];
 
   /**
@@ -64,7 +65,12 @@ class Xophz_Compass_Bazaar_Admin_Orders {
 
     $mapOrderData = function($id){
       $order = wc_get_order($id);
-      return $order->get_data();
+      $data = $order->get_data();
+      $data['order'] = $order->get_order_number();
+      if (isset($data['date_created']) && is_a($data['date_created'], 'WC_DateTime')) {
+          $data['date_created'] = $data['date_created']->date('Y-m-d H:i:s');
+      }
+      return $data;
     };
 
     $orders_data = array_map( $mapOrderData, $orderIds->orders );
@@ -74,6 +80,73 @@ class Xophz_Compass_Bazaar_Admin_Orders {
       'data'        => $orders_data
     ]);
   }
+
+  public function createPosOrder() {
+    $args = Xophz_Compass::get_input_json();
+    $items = isset($args->items) ? $args->items : [];
+
+    // Parse stringified JSON items array from FormData
+    if (is_string($items)) {
+        $decoded = json_decode($items);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            $raw_input = file_get_contents('php://input');
+            parse_str($raw_input, $raw_parsed);
+            $decoded = isset($raw_parsed['items']) ? json_decode(stripslashes($raw_parsed['items'])) : [];
+        }
+        $items = $decoded;
+    }
+
+    $discount = isset($args->discount) ? floatval($args->discount) : 0;
+    $paymentMethod = isset($args->paymentMethod) ? $args->paymentMethod : 'cash';
+
+    if (empty($items)) {
+        Xophz_Compass::output_json(['success' => false, 'message' => 'Cart is empty.']);
+        return;
+    }
+
+    try {
+        $order = wc_create_order();
+
+        foreach ($items as $item) {
+            $product_id = intval($item->product_id);
+            $quantity = intval($item->quantity);
+            $product = wc_get_product($product_id);
+
+            if ($product) {
+                $order->add_product($product, $quantity);
+            }
+        }
+
+        if ($discount > 0) {
+            $item = new WC_Order_Item_Fee();
+            $item->set_name('POS Discount');
+            $item->set_amount(-$discount);
+            $item->set_total(-$discount);
+            $order->add_item($item);
+        }
+
+        // Set payment method
+        $order->set_payment_method($paymentMethod);
+        $order->set_payment_method_title(ucfirst($paymentMethod));
+
+        // Calculate totals
+        $order->calculate_totals();
+
+        // Complete the order since POS is an immediate transaction
+        $order->update_status('completed', 'Order created via Bazaar POS.');
+
+        Xophz_Compass::output_json([
+            'success' => true, 
+            'order_id' => $order->get_id()
+        ]);
+    } catch (Exception $e) {
+        Xophz_Compass::output_json([
+            'success' => false, 
+            'message' => $e->getMessage()
+        ]);
+    }
+  }
+
   /**
     * undocumented function
     *

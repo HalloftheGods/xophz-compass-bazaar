@@ -177,6 +177,8 @@ class Xophz_Compass_Bazaar {
     $this->loader->add_action( 'wp_ajax_get_products', $plugin_admin, 'getProducts'); 
 
     $this->loader->add_action( 'wp_ajax_get_products_stats', $plugin_admin, 'getProductsStats'); 
+
+    $this->loader->add_action( 'wp_ajax_update_product_stock', $plugin_admin, 'updateProductStock');
   }
 
   private function define_compass_hooks(){

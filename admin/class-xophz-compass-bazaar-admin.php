@@ -141,6 +141,45 @@ class Xophz_Compass_Bazaar_Admin {
   }
 
 
+  public function updateProductStock(){
+    $args = Xophz_Compass::get_input_json();
+    $product_id = isset($args->product_id) ? intval($args->product_id) : 0;
+    $quantity = isset($args->quantity) ? intval($args->quantity) : 0;
+    $action = isset($args->action) ? $args->action : 'set'; // 'set', 'add', 'subtract'
+
+    if(!$product_id) {
+        Xophz_Compass::output_json(['success' => false, 'message' => 'Invalid product ID']);
+        return;
+    }
+
+    $product = wc_get_product($product_id);
+    if(!$product || !$product->managing_stock()){
+        Xophz_Compass::output_json(['success' => false, 'message' => 'Product not found or not managing stock']);
+        return;
+    }
+
+    $current_stock = $product->get_stock_quantity();
+    $new_stock = $current_stock;
+
+    if ($action === 'set') {
+        $new_stock = $quantity;
+    } else if ($action === 'add') {
+        $new_stock = $current_stock + $quantity;
+    } else if ($action === 'subtract') {
+        $new_stock = $current_stock - $quantity;
+    }
+
+    wc_update_product_stock($product, $new_stock, 'set');
+    
+    // Get updated product data
+    $updated_products = Xophz_Compass_Bazaar_Admin::getProductsDataByIds([$product_id]);
+
+    Xophz_Compass::output_json([
+        'success' => true,
+        'product' => isset($updated_products[0]) ? $updated_products[0] : null
+    ]);
+  }
+
   public function getProductsStats(){
     $args = Xophz_Compass::get_input_json();
 
@@ -215,18 +254,12 @@ class Xophz_Compass_Bazaar_Admin {
     $products = [];
     foreach($ids as $i => $id){
       $p = new WC_Product($id);
-      $products[$i] = $p->get_data();
-      $products[$i]['thumb'] = wp_get_attachment_image_url( $p->get_image_id() );
-      $products[$i]['image'] = $p->get_image();
-      // $products[] = [
-      //   'price' => $p->get_price(),
-      //   'image' => $p->get_image(),
-      //   'thumb' => wp_get_attachment_image_url( $p->get_image_id() ),
-      //   'title' => $p->get_name(),
-      //   'stock' => $p->get_stock_quantity(),
-      //   'sku'   => $p->get_sku(),
-      //   'id'    => $p->get_id(),
-      // ];
+      $data = $p->get_data();
+      $data['thumb'] = wp_get_attachment_image_url( $p->get_image_id() );
+      $data['image'] = $p->get_image();
+      $data['title'] = $p->get_name();
+      $data['stock'] = $p->get_stock_quantity();
+      $products[$i] = $data;
     }
     return $products;
   }
