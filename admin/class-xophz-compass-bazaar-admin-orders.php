@@ -70,6 +70,15 @@ class Xophz_Compass_Bazaar_Admin_Orders {
       if (isset($data['date_created']) && is_a($data['date_created'], 'WC_DateTime')) {
           $data['date_created'] = $data['date_created']->date('Y-m-d H:i:s');
       }
+      
+      $cashier_id = $order->get_meta('_pos_cashier_id');
+      if ($cashier_id) {
+          $cashier = get_userdata($cashier_id);
+          if ($cashier) {
+              $data['cashier_name'] = $cashier->display_name;
+          }
+      }
+      
       return $data;
     };
 
@@ -106,6 +115,11 @@ class Xophz_Compass_Bazaar_Admin_Orders {
 
     try {
         $order = wc_create_order();
+        
+        $current_user_id = get_current_user_id();
+        if ($current_user_id) {
+            $order->update_meta_data('_pos_cashier_id', $current_user_id);
+        }
 
         foreach ($items as $item) {
             $product_id = intval($item->product_id);
