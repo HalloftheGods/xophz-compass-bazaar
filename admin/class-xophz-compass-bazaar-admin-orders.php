@@ -43,6 +43,8 @@ class Xophz_Compass_Bazaar_Admin_Orders {
     'wp_ajax_get_orders' => 'getOrders',
     'wp_ajax_get_categories' => 'getCategories',
     'wp_ajax_create_pos_order' => 'createPosOrder',
+    'wp_ajax_get_payment_gateways' => 'getPaymentGateways',
+    'wp_ajax_update_order_status' => 'updateOrderStatus',
   ];
 
   /**
@@ -146,8 +148,15 @@ class Xophz_Compass_Bazaar_Admin_Orders {
         // Calculate totals
         $order->calculate_totals();
 
-        // Complete the order since POS is an immediate transaction
-        $order->update_status('completed', 'Order created via Bazaar POS.');
+        // Mimic WooCommerce behavior for manual payment gateways
+        if ( in_array( $paymentMethod, ['bacs', 'cheque'] ) ) {
+            $order->update_status('on-hold', 'Order created via Bazaar POS.');
+        } elseif ( $paymentMethod === 'cod' ) {
+            $order->update_status('processing', 'Order created via Bazaar POS.');
+        } else {
+            // For card/cash payments at POS, we assume immediate completion
+            $order->update_status('completed', 'Order created via Bazaar POS.');
+        }
 
         Xophz_Compass::output_json([
             'success' => true, 
@@ -159,6 +168,55 @@ class Xophz_Compass_Bazaar_Admin_Orders {
             'message' => $e->getMessage()
         ]);
     }
+  }
+
+  public function getPaymentGateways() {
+      if ( ! function_exists( 'WC' ) ) {
+          Xophz_Compass::output_json(['gateways' => []]);
+          return;
+      }
+      
+      $gateways = WC()->payment_gateways()->get_available_payment_gateways();
+      $data = [];
+      
+      foreach($gateways as $gateway) {
+          $data[] = [
+              'id' => $gateway->id,
+              'title' => $gateway->title,
+              'method_title' => $gateway->get_method_title()
+          ];
+      }
+      
+      Xophz_Compass::output_json(['gateways' => array_values($data)]);
+  }
+
+  public function updateOrderStatus() {
+      $args = Xophz_Compass::get_input_json();
+      $order_id = isset($args->order_id) ? intval($args->order_id) : 0;
+      $status = isset($args->status) ? sanitize_text_field($args->status) : '';
+
+      if (!$order_id || !$status) {
+          Xophz_Compass::output_json(['success' => false, 'message' => 'Invalid order ID or status']);
+          return;
+      }
+
+      $order = wc_get_order($order_id);
+      if (!$order) {
+          Xophz_Compass::output_json(['success' => false, 'message' => 'Order not found']);
+          return;
+      }
+
+      try {
+          $order->update_status($status, 'Order status updated via COMPASS Bazaar UI.');
+          
+          Xophz_Compass::output_json([
+              'success' => true,
+              'order_id' => $order_id,
+              'new_status' => $order->get_status()
+          ]);
+      } catch (Exception $e) {
+          Xophz_Compass::output_json(['success' => false, 'message' => $e->getMessage()]);
+      }
   }
 
   /**
