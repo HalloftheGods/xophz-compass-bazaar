@@ -45,6 +45,12 @@ class Xophz_Compass_Bazaar_Admin_Orders {
     'wp_ajax_create_pos_order' => 'createPosOrder',
     'wp_ajax_get_payment_gateways' => 'getPaymentGateways',
     'wp_ajax_update_order_status' => 'updateOrderStatus',
+    'wp_ajax_validate_pos_coupon' => 'validatePosCoupon',
+    'wp_ajax_send_pos_receipt' => 'sendPosReceipt',
+    'wp_ajax_get_pos_customers' => 'getPosCustomers',
+    'wp_ajax_email_shift_summary' => 'emailShiftSummary',
+    'wp_ajax_get_pos_order_for_refund' => 'getPosOrderForRefund',
+    'wp_ajax_process_pos_refund' => 'processPosRefund',
   ];
 
   /**
@@ -92,6 +98,173 @@ class Xophz_Compass_Bazaar_Admin_Orders {
     ]);
   }
 
+  public function validatePosCoupon() {
+    $args = Xophz_Compass::get_input_json();
+    $code = isset($args->code) ? sanitize_text_field($args->code) : '';
+
+    if (!$code) {
+        Xophz_Compass::output_json(['success' => false, 'message' => 'Coupon code is required.']);
+        return;
+    }
+
+    $coupon = new WC_Coupon($code);
+    if (!$coupon->get_id() || !$coupon->is_valid()) {
+        Xophz_Compass::output_json(['success' => false, 'message' => 'Invalid or expired coupon code.']);
+        return;
+    }
+
+    Xophz_Compass::output_json([
+        'success' => true,
+        'code' => $coupon->get_code(),
+        'type' => $coupon->get_discount_type(),
+        'amount' => $coupon->get_amount(),
+    ]);
+  }
+
+  public function sendPosReceipt() {
+    $args = Xophz_Compass::get_input_json();
+    $recipient = isset($args->recipient) ? sanitize_text_field($args->recipient) : '';
+    $order_id = isset($args->order_id) ? intval($args->order_id) : 0;
+
+    if (!$recipient || !$order_id) {
+        Xophz_Compass::output_json(['success' => false, 'message' => 'Recipient and Order ID are required.']);
+        return;
+    }
+
+    $order = wc_get_order($order_id);
+    if (!$order) {
+        Xophz_Compass::output_json(['success' => false, 'message' => 'Order not found.']);
+        return;
+    }
+
+    $is_email = strpos($recipient, '@') !== false;
+
+    if ($is_email) {
+        $order->set_billing_email($recipient);
+        $order->save();
+        
+        $subscribe_newsletter = isset($args->subscribe_newsletter) ? rest_sanitize_boolean($args->subscribe_newsletter) : false;
+        if ($subscribe_newsletter) {
+            global $wpdb;
+            $table = $wpdb->prefix . 'bomb_bag_subscribers';
+            $junction = $wpdb->prefix . 'bomb_bag_list_subscribers';
+            
+            // Check if email already exists in Bomb Bag
+            $existing_id = $wpdb->get_var($wpdb->prepare(
+                "SELECT id FROM $table WHERE email = %s", $recipient
+            ));
+            
+            if (!$existing_id) {
+                $wpdb->insert($table, array(
+                    'email'      => $recipient,
+                    'first_name' => $order->get_billing_first_name() ?: '',
+                    'last_name'  => $order->get_billing_last_name() ?: '',
+                    'source'     => 'pos_checkout',
+                    'status'     => 'active'
+                ));
+                $existing_id = $wpdb->insert_id;
+            }
+            
+            if ($existing_id) {
+                // Find the first available list or fallback to 1
+                $lists_table = $wpdb->prefix . 'bomb_bag_lists';
+                $default_list_id = $wpdb->get_var("SELECT id FROM $lists_table ORDER BY id ASC LIMIT 1");
+                
+                if ($default_list_id) {
+                    $wpdb->query($wpdb->prepare(
+                        "INSERT IGNORE INTO $junction (list_id, subscriber_id) VALUES (%d, %d)",
+                        $default_list_id, $existing_id
+                    ));
+                }
+            }
+        }
+
+        if (function_exists('WC')) {
+            $mailer = WC()->mailer();
+            $invoice_email = isset($mailer->emails['WC_Email_Customer_Invoice']) ? $mailer->emails['WC_Email_Customer_Invoice'] : null;
+            if ($invoice_email) {
+                $invoice_email->trigger($order_id);
+            }
+        }
+
+        Xophz_Compass::output_json([
+            'success' => true,
+            'type' => 'email',
+            'message' => 'Receipt invoice email sent successfully.'
+        ]);
+    } else {
+        $sanitized_phone = preg_replace('/[^0-9+]/', '', $recipient);
+        
+        do_action('xophz_compass_send_sms_receipt', $sanitized_phone, $order_id);
+
+        Xophz_Compass::output_json([
+            'success' => true,
+            'type' => 'sms',
+            'message' => 'Receipt SMS request dispatched.'
+        ]);
+    }
+  }
+
+  public function emailShiftSummary() {
+    $args = Xophz_Compass::get_input_json();
+    $current_user = wp_get_current_user();
+    
+    if (!$current_user || !$current_user->exists()) {
+        Xophz_Compass::output_json(['success' => false, 'message' => 'Not authenticated.']);
+        return;
+    }
+
+    $cash = isset($args->cash) ? floatval($args->cash) : 0;
+    $card = isset($args->card) ? floatval($args->card) : 0;
+    $coupons = isset($args->coupons) ? floatval($args->coupons) : 0;
+    $customDiscounts = isset($args->customDiscounts) ? floatval($args->customDiscounts) : 0;
+    $totalTips = isset($args->totalTips) ? floatval($args->totalTips) : 0;
+    $totalOrders = isset($args->totalOrders) ? intval($args->totalOrders) : 0;
+    $totalSales = $cash + $card;
+
+    $site_name = get_bloginfo('name');
+    $date_str = current_time('M d, Y, h:i A');
+
+    $html = "
+    <div style='font-family: sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #eaeaea; border-radius: 8px;'>
+        <h2 style='text-align: center; color: #333;'>$site_name - POS Shift Summary</h2>
+        <p style='text-align: center; color: #666; font-size: 14px;'>Report generated: $date_str</p>
+        <hr style='border: none; border-top: 1px solid #eaeaea; margin: 20px 0;'>
+        <table style='width: 100%; border-collapse: collapse;'>
+            <tr><td style='padding: 8px 0; color: #555;'>Total Orders:</td><td style='text-align: right; font-weight: bold;'>$totalOrders</td></tr>
+            <tr><td style='padding: 8px 0; color: #555;'>Cash Tended:</td><td style='text-align: right; font-weight: bold; color: #28a745;'>$" . number_format($cash, 2) . "</td></tr>
+            <tr><td style='padding: 8px 0; color: #555;'>Card/Electronic:</td><td style='text-align: right; font-weight: bold; color: #007bff;'>$" . number_format($card, 2) . "</td></tr>
+            <tr><td style='padding: 8px 0; color: #555;'>Tips Collected:</td><td style='text-align: right; font-weight: bold; color: #20c997;'>+$" . number_format($totalTips, 2) . "</td></tr>
+            <tr><td style='padding: 8px 0; color: #555;'>Coupons Applied:</td><td style='text-align: right; font-weight: bold; color: #ffc107;'>-$" . number_format($coupons, 2) . "</td></tr>
+            <tr><td style='padding: 8px 0; color: #555;'>Custom Discounts:</td><td style='text-align: right; font-weight: bold; color: #ffc107;'>-$" . number_format($customDiscounts, 2) . "</td></tr>
+        </table>
+        <hr style='border: none; border-top: 1px solid #eaeaea; margin: 20px 0;'>
+        <div style='display: flex; justify-content: space-between; font-size: 18px; font-weight: bold;'>
+            <span>Total Shift Sales:</span>
+            <span>$" . number_format($totalSales, 2) . "</span>
+        </div>
+    </div>
+    ";
+
+    $headers = ['Content-Type: text/html; charset=UTF-8'];
+    
+    $recipients = [$current_user->user_email];
+    $cashierId = isset($args->cashierId) ? intval($args->cashierId) : 0;
+    if ($cashierId && $cashierId !== $current_user->ID) {
+        $cashier_user = get_userdata($cashierId);
+        if ($cashier_user && !empty($cashier_user->user_email)) {
+            $recipients[] = $cashier_user->user_email;
+        }
+    }
+
+    $sent = wp_mail($recipients, "POS Shift Summary - $site_name", $html, $headers);
+
+    Xophz_Compass::output_json([
+        'success' => $sent,
+        'message' => $sent ? 'Shift summary emailed to ' . implode(', ', $recipients) : 'Failed to send email.'
+    ]);
+  }
+
   public function createPosOrder() {
     $args = Xophz_Compass::get_input_json();
     $items = isset($args->items) ? $args->items : [];
@@ -108,7 +281,11 @@ class Xophz_Compass_Bazaar_Admin_Orders {
     }
 
     $discount = isset($args->discount) ? floatval($args->discount) : 0;
+    $customDiscounts = isset($args->customDiscounts) ? $args->customDiscounts : [];
+    $appliedCoupons = isset($args->appliedCoupons) ? $args->appliedCoupons : [];
+    $tipAmount = isset($args->tipAmount) ? floatval($args->tipAmount) : 0;
     $paymentMethod = isset($args->paymentMethod) ? $args->paymentMethod : 'cash';
+    $splitPayments = isset($args->splitPayments) ? $args->splitPayments : [];
 
     if (empty($items)) {
         Xophz_Compass::output_json(['success' => false, 'message' => 'Cart is empty.']);
@@ -118,9 +295,21 @@ class Xophz_Compass_Bazaar_Admin_Orders {
     try {
         $order = wc_create_order();
         
-        $current_user_id = get_current_user_id();
-        if ($current_user_id) {
-            $order->update_meta_data('_pos_cashier_id', $current_user_id);
+        $customerId = isset($args->customerId) ? intval($args->customerId) : 0;
+        if ($customerId) {
+            $order->set_customer_id($customerId);
+            $customer = new WC_Customer($customerId);
+            if ($customer) {
+                $order->set_billing_first_name($customer->get_billing_first_name() ?: $customer->get_first_name());
+                $order->set_billing_last_name($customer->get_billing_last_name() ?: $customer->get_last_name());
+                $order->set_billing_email($customer->get_billing_email() ?: $customer->get_email());
+                $order->set_billing_phone($customer->get_billing_phone() ?: $customer->get_meta('billing_phone'));
+            }
+        }
+
+        $cashier_id = isset($args->cashierId) ? intval($args->cashierId) : get_current_user_id();
+        if ($cashier_id) {
+            $order->update_meta_data('_pos_cashier_id', $cashier_id);
         }
 
         foreach ($items as $item) {
@@ -141,9 +330,55 @@ class Xophz_Compass_Bazaar_Admin_Orders {
             $order->add_item($item);
         }
 
+        if (is_array($appliedCoupons)) {
+            foreach ($appliedCoupons as $code) {
+                if (is_string($code)) {
+                    $order->apply_coupon(sanitize_text_field($code));
+                }
+            }
+        }
+
+        if (is_array($customDiscounts)) {
+            foreach ($customDiscounts as $cd) {
+                $amount = isset($cd->amount) ? floatval($cd->amount) : 0;
+                $name = isset($cd->name) && !empty($cd->name) ? sanitize_text_field($cd->name) : 'Custom Discount';
+                
+                if ($amount > 0) {
+                    $item = new WC_Order_Item_Fee();
+                    $item->set_name($name);
+                    $item->set_amount(-$amount);
+                    $item->set_total(-$amount);
+                    $order->add_item($item);
+                }
+            }
+        }
+
+        if ($tipAmount > 0) {
+            $item = new WC_Order_Item_Fee();
+            $item->set_name('Tip');
+            $item->set_amount($tipAmount);
+            $item->set_total($tipAmount);
+            $order->add_item($item);
+            $order->update_meta_data('_pos_tip_amount', $tipAmount);
+            if (isset($cashier_id)) {
+                $order->update_meta_data('_pos_tip_cashier_id', $cashier_id);
+            }
+        }
+
         // Set payment method
         $order->set_payment_method($paymentMethod);
-        $order->set_payment_method_title(ucfirst($paymentMethod));
+        $order->set_payment_method_title($paymentMethod === 'bazaar_split' ? 'Split Payment' : ucfirst($paymentMethod));
+
+        if ($paymentMethod === 'bazaar_split' && !empty($splitPayments)) {
+            $order->update_meta_data('_pos_split_payments', json_encode($splitPayments));
+            $note = "Split Payment Breakdown:\n";
+            foreach ($splitPayments as $sp) {
+                $method = isset($sp->method) ? $sp->method : 'unknown';
+                $amt = isset($sp->amount) ? floatval($sp->amount) : 0;
+                $note .= "- " . ucfirst($method) . ": $" . number_format($amt, 2) . "\n";
+            }
+            $order->add_order_note($note);
+        }
 
         // Calculate totals
         $order->calculate_totals();
@@ -158,9 +393,18 @@ class Xophz_Compass_Bazaar_Admin_Orders {
             $order->update_status('completed', 'Order created via Bazaar POS.');
         }
 
+        if ($customerId) {
+            do_action('xophz_compass_record_action', 'bazaar_pos_purchase', $customerId, [
+                'order_id' => $order->get_id(),
+                'total' => $order->get_total(),
+                'payment_method' => $paymentMethod
+            ]);
+        }
+
         Xophz_Compass::output_json([
             'success' => true, 
-            'order_id' => $order->get_id()
+            'order_id' => $order->get_id(),
+            'order_key' => $order->get_order_key()
         ]);
     } catch (Exception $e) {
         Xophz_Compass::output_json([
@@ -255,6 +499,164 @@ class Xophz_Compass_Bazaar_Admin_Orders {
     Xophz_Compass::output_json([
       'categories' => $walker->categories 
     ]);
+  }
+
+  public function getPosCustomers() {
+      $args = Xophz_Compass::get_input_json();
+      $search = isset($args->search) ? sanitize_text_field($args->search) : '';
+
+      $query_args = [
+          'number' => 20,
+          'orderby' => 'display_name',
+          'order' => 'ASC',
+      ];
+
+      if ($search) {
+          $query_args['search'] = '*' . esc_attr($search) . '*';
+          $query_args['search_columns'] = ['user_login', 'user_email', 'user_nicename', 'display_name'];
+      }
+
+      $user_query = new WP_User_Query($query_args);
+      $users = $user_query->get_results();
+      $data = [];
+
+      foreach ($users as $user) {
+          $customer = new WC_Customer($user->ID);
+          $phone = '';
+          if ($customer) {
+              $phone = $customer->get_billing_phone() ?: get_user_meta($user->ID, 'billing_phone', true);
+          }
+          
+          $data[] = [
+              'id' => $user->ID,
+              'name' => $user->display_name,
+              'email' => $user->user_email,
+              'phone' => $phone
+          ];
+      }
+
+      Xophz_Compass::output_json([
+        'success' => true,
+        'customers' => $customers_data
+    ]);
+  }
+
+  public function getPosOrderForRefund() {
+    $args = Xophz_Compass::get_input_json();
+    $order_id = isset($args->order_id) ? intval($args->order_id) : 0;
+
+    if (!$order_id) {
+        Xophz_Compass::output_json(['success' => false, 'message' => 'Order ID is required.']);
+        return;
+    }
+
+    $order = wc_get_order($order_id);
+    if (!$order) {
+        Xophz_Compass::output_json(['success' => false, 'message' => 'Order not found.']);
+        return;
+    }
+
+    $items_data = [];
+    foreach ($order->get_items() as $item_id => $item) {
+        $product = $item->get_product();
+        $refunded_qty = $order->get_qty_refunded_for_item($item_id);
+        $qty_available = $item->get_quantity() + $refunded_qty; // refunded is negative
+        
+        if ($qty_available > 0) {
+            $items_data[] = [
+                'item_id' => $item_id,
+                'product_id' => $item->get_product_id(),
+                'name' => $item->get_name(),
+                'qty_available' => $qty_available,
+                'price' => $order->get_item_total($item, false, false),
+                'total' => $order->get_line_total($item, false, false),
+                'tax' => $order->get_line_tax($item),
+                'thumb' => $product ? wp_get_attachment_image_url($product->get_image_id(), 'thumbnail') : ''
+            ];
+        }
+    }
+
+    Xophz_Compass::output_json([
+        'success' => true,
+        'order' => [
+            'id' => $order->get_id(),
+            'status' => $order->get_status(),
+            'total' => $order->get_total(),
+            'total_refunded' => $order->get_total_refunded(),
+            'items' => $items_data
+        ]
+    ]);
+  }
+
+  public function processPosRefund() {
+    $args = Xophz_Compass::get_input_json();
+    $order_id = isset($args->order_id) ? intval($args->order_id) : 0;
+    $refund_items = isset($args->items) ? $args->items : [];
+    $reason = isset($args->reason) ? sanitize_text_field($args->reason) : 'POS Return';
+
+    if (!$order_id || empty($refund_items)) {
+        Xophz_Compass::output_json(['success' => false, 'message' => 'Invalid refund parameters.']);
+        return;
+    }
+
+    $order = wc_get_order($order_id);
+    if (!$order) {
+        Xophz_Compass::output_json(['success' => false, 'message' => 'Order not found.']);
+        return;
+    }
+
+    $line_items = [];
+    $refund_amount = 0;
+
+    foreach ($refund_items as $r_item) {
+        $item_id = intval($r_item->item_id);
+        $qty = intval($r_item->qty);
+        
+        $order_item = $order->get_item($item_id);
+        if (!$order_item) continue;
+
+        $unit_total = $order->get_item_total($order_item, false, false);
+        $unit_tax = $order->get_line_tax($order_item) / $order_item->get_quantity();
+
+        $line_total = $unit_total * $qty;
+        $line_tax = $unit_tax * $qty;
+
+        $refund_amount += ($line_total + $line_tax);
+
+        $line_items[$item_id] = [
+            'qty' => $qty,
+            'refund_total' => $line_total,
+            'refund_tax' => [$order_item->get_taxes()['total'] ? key($order_item->get_taxes()['total']) : 0 => $line_tax]
+        ];
+    }
+
+    try {
+        $refund = wc_create_refund([
+            'amount'         => $refund_amount,
+            'reason'         => $reason,
+            'order_id'       => $order_id,
+            'line_items'     => $line_items,
+            'refund_payment' => false, // Do not auto-refund gateway for POS, handle manually if needed
+            'restock_items'  => true
+        ]);
+
+        if (is_wp_error($refund)) {
+            throw new Exception($refund->get_error_message());
+        }
+
+        Xophz_Compass::output_json([
+            'success' => true,
+            'message' => 'Refund processed successfully.',
+            'refund_id' => $refund->get_id(),
+            'amount' => $refund_amount
+        ]);
+
+    } catch (Exception $e) {
+        Xophz_Compass::output_json([
+            'success' => false,
+            'message' => $e->getMessage()
+        ]);
+    }
   }
 
   public static function getOrderIds($args){
