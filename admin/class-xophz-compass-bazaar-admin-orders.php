@@ -310,6 +310,14 @@ class Xophz_Compass_Bazaar_Admin_Orders {
         $cashier_id = isset($args->cashierId) ? intval($args->cashierId) : get_current_user_id();
         if ($cashier_id) {
             $order->update_meta_data('_pos_cashier_id', $cashier_id);
+            
+            // Track the WP post author to the cashier for global attribution and CRM
+            if ( get_post_type( $order->get_id() ) === 'shop_order' ) {
+                wp_update_post( [
+                    'ID'          => $order->get_id(),
+                    'post_author' => $cashier_id
+                ] );
+            }
         }
 
         foreach ($items as $item) {
@@ -365,9 +373,10 @@ class Xophz_Compass_Bazaar_Admin_Orders {
             }
         }
 
-        // Set payment method
+        // Set payment method and origin
         $order->set_payment_method($paymentMethod);
         $order->set_payment_method_title($paymentMethod === 'bazaar_split' ? 'Split Payment' : ucfirst($paymentMethod));
+        $order->set_created_via('bazaar_pos');
 
         if ($paymentMethod === 'bazaar_split' && !empty($splitPayments)) {
             $order->update_meta_data('_pos_split_payments', json_encode($splitPayments));
