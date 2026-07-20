@@ -715,7 +715,8 @@ class Walker_Simple_String extends Walker {
 
     $cat_name = apply_filters( 'list_product_cats', $cat->name, $cat );
     $this->categories[] = [
-      'text' => esc_html( $pad . $cat_name ) . '&nbsp;(' . absint( $cat->count ) . ')',
+      'id'    => $cat->term_id,
+      'text'  => esc_html( $pad . $cat_name ) . '&nbsp;(' . absint( $cat->count ) . ')',
       'value' => $cat->slug
     ];
 	}
@@ -741,7 +742,7 @@ class Walker_Simple_String extends Walker {
 	 * @return null Null on failure with no changes to parameters.
 	 */
 	public function display_element( $element, &$children_elements, $max_depth, $depth, $args, &$output ) {
-    if ( ! $element || ( 0 === $element->count && ! empty( $args[0]['hide_empty'] ) ) ) {
+    if ( ! $element || ( empty( $element->count ) && ! empty( $args[0]['hide_empty'] ) ) ) {
       return;
     }
     parent::display_element( $element, $children_elements, $max_depth, $depth, $args, $output );

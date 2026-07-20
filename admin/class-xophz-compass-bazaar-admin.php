@@ -311,20 +311,17 @@ class Xophz_Compass_Bazaar_Admin {
       ? Xophz_Compass_Bazaar_Admin::getPostIdsByFilters( $args->filters ) : [];
 
     $default = [
-      // 'status'               => 'publish',
-      // 'featured'             => true,
-      // 'orderby'              => $ordering['orderby'],
-      // 'order'                => $ordering['order'],
       'include'   => !empty($posts)  ? $posts : '',
       'return'    => 'ids',
       'paginate'  => true
     ];
 
-    // if( !empty($args->filters) && !empty($posts) ){
-    //   return [];
-    // }
+    $args_array = (array) $args;
+    if (isset($args_array['category']) && is_string($args_array['category'])) {
+        $args_array['category'] = [$args_array['category']];
+    }
 
-    return wc_get_products( array_merge($default, (array) $args) );
+    return wc_get_products( array_merge($default, $args_array) );
   } 
 
   public static function getProductsDataByIds($ids){
