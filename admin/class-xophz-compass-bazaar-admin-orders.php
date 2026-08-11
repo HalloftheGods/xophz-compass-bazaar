@@ -44,6 +44,8 @@ class Xophz_Compass_Bazaar_Admin_Orders {
     'wp_ajax_get_categories' => 'getCategories',
     'wp_ajax_create_pos_order' => 'createPosOrder',
     'wp_ajax_get_payment_gateways' => 'getPaymentGateways',
+    'wp_ajax_get_all_payment_gateways' => 'getAllPaymentGateways',
+    'wp_ajax_toggle_payment_gateway' => 'togglePaymentGateway',
     'wp_ajax_update_order_status' => 'updateOrderStatus',
     'wp_ajax_validate_pos_coupon' => 'validatePosCoupon',
     'wp_ajax_send_pos_receipt' => 'sendPosReceipt',
@@ -443,6 +445,74 @@ class Xophz_Compass_Bazaar_Admin_Orders {
       Xophz_Compass::output_json(['gateways' => array_values($data)]);
   }
 
+  public function getAllPaymentGateways() {
+      if ( ! function_exists( 'WC' ) ) {
+          Xophz_Compass::output_json(['success' => false, 'gateways' => []]);
+          return;
+      }
+      
+      $gateways = WC()->payment_gateways()->payment_gateways();
+      $data = [];
+      
+      foreach($gateways as $gateway) {
+          $is_enabled = ($gateway->enabled === 'yes');
+          $needs_setup = false;
+
+          // Detect credential requirements (e.g. Stripe)
+          if ($gateway->id === 'stripe' || strpos($gateway->id, 'stripe') !== false) {
+              $secret_key = $gateway->get_option('secret_key') ?: $gateway->get_option('test_secret_key');
+              if (empty($secret_key)) {
+                  $needs_setup = true;
+              }
+          }
+          
+          $data[] = [
+              'id' => $gateway->id,
+              'title' => $gateway->title ?: $gateway->get_method_title(),
+              'method_title' => $gateway->get_method_title(),
+              'description' => $gateway->description ?: '',
+              'enabled' => $is_enabled,
+              'needs_setup' => $needs_setup
+          ];
+      }
+      
+      Xophz_Compass::output_json(['success' => true, 'gateways' => array_values($data)]);
+  }
+
+  public function togglePaymentGateway() {
+      if ( ! function_exists( 'WC' ) ) {
+          Xophz_Compass::output_json(['success' => false, 'message' => 'WooCommerce is not active.']);
+          return;
+      }
+
+      $args = Xophz_Compass::get_input_json();
+      $gateway_id = isset($args->gateway_id) ? sanitize_text_field($args->gateway_id) : '';
+      $enabled = isset($args->enabled) ? (bool)$args->enabled : false;
+
+      if (!$gateway_id) {
+          Xophz_Compass::output_json(['success' => false, 'message' => 'Gateway ID is required.']);
+          return;
+      }
+
+      $gateways = WC()->payment_gateways()->payment_gateways();
+      if (!isset($gateways[$gateway_id])) {
+          Xophz_Compass::output_json(['success' => false, 'message' => 'Payment gateway not found.']);
+          return;
+      }
+
+      $gateway = $gateways[$gateway_id];
+      $gateway->update_option('enabled', $enabled ? 'yes' : 'no');
+
+      // Re-initialize payment gateways
+      WC()->payment_gateways()->init();
+
+      Xophz_Compass::output_json([
+          'success' => true,
+          'gateway_id' => $gateway_id,
+          'enabled' => $enabled
+      ]);
+  }
+
   public function updateOrderStatus() {
       $args = Xophz_Compass::get_input_json();
       $order_id = isset($args->order_id) ? intval($args->order_id) : 0;
@@ -491,7 +561,7 @@ class Xophz_Compass_Bazaar_Admin_Orders {
         'pad_counts'         => 1,
         'show_count'         => 1,
         'hierarchical'       => 1,
-        'hide_empty'         => 1,
+        'hide_empty'         => 0,
         'taxonomy'           => 'product_cat',
     );
 
@@ -530,12 +600,21 @@ class Xophz_Compass_Bazaar_Admin_Orders {
       $data = [];
 
       foreach ($users as $user) {
-          $customer = new WC_Customer($user->ID);
           $phone = '';
-          if ($customer) {
-              $phone = $customer->get_billing_phone() ?: get_user_meta($user->ID, 'billing_phone', true);
+          if (class_exists('WC_Customer')) {
+              try {
+                  $customer = new WC_Customer($user->ID);
+                  if ($customer) {
+                      $phone = $customer->get_billing_phone();
+                  }
+              } catch (\Throwable $e) {
+                  // Fallback to user meta
+              }
           }
-          
+          if (!$phone) {
+              $phone = get_user_meta($user->ID, 'billing_phone', true);
+          }
+
           $data[] = [
               'id' => $user->ID,
               'name' => $user->display_name,
@@ -546,8 +625,8 @@ class Xophz_Compass_Bazaar_Admin_Orders {
 
       Xophz_Compass::output_json([
         'success' => true,
-        'customers' => $customers_data
-    ]);
+        'customers' => $data
+      ]);
   }
 
   public function getPosOrderForRefund() {
@@ -674,6 +753,10 @@ class Xophz_Compass_Bazaar_Admin_Orders {
       'paginate'  => true
     ];
 
+    if ( ! function_exists( 'wc_get_orders' ) ) {
+        return (object) [ 'orders' => [], 'total' => 0, 'max_num_pages' => 0 ];
+    }
+
     return wc_get_orders( array_merge($default, (array) $args) );
   }
 }
@@ -711,12 +794,14 @@ class Walker_Simple_String extends Walker {
 	 * @param int    $current_object_id Current object ID.
 	 */
 	public function start_el( &$output, $cat, $depth = 0, $args = array(), $current_object_id = 0 ) {
-    $pad = str_repeat( '&nbsp;', $depth * 3 );
+    $indent = $depth > 0 ? str_repeat( '- ', $depth ) : '';
 
     $cat_name = apply_filters( 'list_product_cats', $cat->name, $cat );
+    $cat_name = html_entity_decode( $cat_name, ENT_QUOTES, 'UTF-8' );
     $this->categories[] = [
       'id'    => $cat->term_id,
-      'text'  => esc_html( $pad . $cat_name ) . '&nbsp;(' . absint( $cat->count ) . ')',
+      'name'  => $cat_name,
+      'text'  => $indent . $cat_name . ' (' . absint( $cat->count ) . ')',
       'value' => $cat->slug
     ];
 	}
@@ -742,7 +827,7 @@ class Walker_Simple_String extends Walker {
 	 * @return null Null on failure with no changes to parameters.
 	 */
 	public function display_element( $element, &$children_elements, $max_depth, $depth, $args, &$output ) {
-    if ( ! $element || ( empty( $element->count ) && ! empty( $args[0]['hide_empty'] ) ) ) {
+    if ( ! $element ) {
       return;
     }
     parent::display_element( $element, $children_elements, $max_depth, $depth, $args, $output );
