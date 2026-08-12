@@ -377,7 +377,20 @@ class Xophz_Compass_Bazaar_Admin_Orders {
 
         // Set payment method and origin
         $order->set_payment_method($paymentMethod);
-        $order->set_payment_method_title($paymentMethod === 'bazaar_split' ? 'Split Payment' : ucfirst($paymentMethod));
+        
+        $method_title = ucfirst($paymentMethod);
+        if ($paymentMethod === 'bazaar_split') {
+            $method_title = 'Split Payment';
+        } else if ( function_exists( 'WC' ) ) {
+            $gateways = WC()->payment_gateways()->payment_gateways();
+            if ( isset( $gateways[$paymentMethod] ) ) {
+                $gw = $gateways[$paymentMethod];
+                $raw = $gw->title ?: $gw->get_method_title();
+                $method_title = $this->clean_payment_title($raw, $paymentMethod);
+            }
+        }
+
+        $order->set_payment_method_title($method_title);
         $order->set_created_via('bazaar_pos');
 
         if ($paymentMethod === 'bazaar_split' && !empty($splitPayments)) {
@@ -425,6 +438,24 @@ class Xophz_Compass_Bazaar_Admin_Orders {
     }
   }
 
+  private function clean_payment_title($raw_title, $gateway_id = '') {
+      $title = trim($raw_title);
+      
+      if (preg_match('/WooPayments\s*\(([^)]+)\)/i', $title, $matches)) {
+          $inner = trim($matches[1]);
+          if (strcasecmp($inner, 'Card') === 0) {
+              return 'Credit Card';
+          }
+          return $inner;
+      }
+
+      if (strcasecmp($title, 'WooPayments') === 0) {
+          return 'Credit Card';
+      }
+
+      return $title;
+  }
+
   public function getPaymentGateways() {
       if ( ! function_exists( 'WC' ) ) {
           Xophz_Compass::output_json(['gateways' => []]);
@@ -435,9 +466,10 @@ class Xophz_Compass_Bazaar_Admin_Orders {
       $data = [];
       
       foreach($gateways as $gateway) {
+          $raw_title = $gateway->title ?: $gateway->get_method_title();
           $data[] = [
               'id' => $gateway->id,
-              'title' => $gateway->title,
+              'title' => $this->clean_payment_title($raw_title, $gateway->id),
               'method_title' => $gateway->get_method_title()
           ];
       }
@@ -466,9 +498,11 @@ class Xophz_Compass_Bazaar_Admin_Orders {
               }
           }
           
+          $raw_title = $gateway->title ?: $gateway->get_method_title();
+
           $data[] = [
               'id' => $gateway->id,
-              'title' => $gateway->title ?: $gateway->get_method_title(),
+              'title' => $this->clean_payment_title($raw_title, $gateway->id),
               'method_title' => $gateway->get_method_title(),
               'description' => $gateway->description ?: '',
               'enabled' => $is_enabled,
