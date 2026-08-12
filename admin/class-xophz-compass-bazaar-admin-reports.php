@@ -190,8 +190,8 @@ class Xophz_Compass_Bazaar_Admin_Reports{
     $results = $wpdb->get_results("
       SELECT 
         MONTHNAME(post_date) as month, 
-        SUM(meta.meta_value) AS total_views, 
-        COUNT(posts.ID) AS total_posts 
+        SUM(CAST(meta.meta_value AS UNSIGNED)) AS total_views, 
+        COUNT(DISTINCT posts.ID) AS total_posts 
       FROM 
         {$wpdb->posts} AS posts
       LEFT JOIN 
@@ -199,9 +199,11 @@ class Xophz_Compass_Bazaar_Admin_Reports{
         ON 
           posts.ID = meta.post_id
       WHERE 
-        meta.meta_key = 'post_views_count'
+        meta.meta_key IN ('post_views_count', '_views_count', 'views', '_post_views_count', 'post_views')
         AND 
         post_date > DATE_SUB(now(), INTERVAL 6 MONTH)
+        AND 
+        posts.post_status = 'publish'
       GROUP BY 
         YEAR(posts.post_date), MONTH(posts.post_date)
       ORDER BY YEAR(posts.post_date) ASC, MONTH(posts.post_date) ASC
@@ -213,6 +215,32 @@ class Xophz_Compass_Bazaar_Admin_Reports{
 
     $total_views = array_sum($views);
     $total_posts = array_sum($posts);
+
+    // If no post_views_count meta keys exist yet, fallback to published post count
+    if ($total_views === 0) {
+      $fallback_results = $wpdb->get_results("
+        SELECT 
+          MONTHNAME(post_date) as month, 
+          COUNT(ID) AS total_posts 
+        FROM 
+          {$wpdb->posts}
+        WHERE 
+          post_type IN ('post', 'product', 'page')
+          AND 
+          post_status = 'publish'
+          AND 
+          post_date > DATE_SUB(now(), INTERVAL 6 MONTH)
+        GROUP BY 
+          YEAR(post_date), MONTH(post_date)
+        ORDER BY YEAR(post_date) ASC, MONTH(post_date) ASC
+      ");
+
+      if (!empty($fallback_results)) {
+        $labels = array_column($fallback_results, 'month');
+        $posts = array_map('intval', array_column($fallback_results, 'total_posts'));
+        $total_posts = array_sum($posts);
+      }
+    }
 
     Xophz_Compass::output_json([
       'sparkline' =>  [

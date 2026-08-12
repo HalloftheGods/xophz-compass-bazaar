@@ -329,7 +329,14 @@ class Xophz_Compass_Bazaar_Admin_Sales{
 
     $sku = $settings['sku']; 
 
-    $status = implode("','wc-", $settings['status']);
+    $raw_status = is_array($settings['status']) ? $settings['status'] : [$settings['status']];
+    $status_list = [];
+    foreach ($raw_status as $st) {
+      $clean_st = preg_replace('/^wc-/', '', trim($st));
+      $status_list[] = "wc-{$clean_st}";
+      $status_list[] = "{$clean_st}";
+    }
+    $status_sql = "'" . implode("','", array_unique($status_list)) . "'";
 
     if($sku){
       switch( $settings['sku_scope'] ){
@@ -349,10 +356,10 @@ class Xophz_Compass_Bazaar_Admin_Sales{
           $sku = "LIKE '%{$sku}'";
         break;
       }
-      $sku = " WHERE pm.meta_value {$sku} ";
+      $sku = " WHERE COALESCE(pm.meta_value, '') {$sku} ";
     }
 
-    $gmt = $settings['gmt'] ? '_gmt' : '';
+    $gmt = !empty($settings['gmt']) ? '_gmt' : '';
 
     $hpos_enabled = class_exists('\Automattic\WooCommerce\Utilities\OrderUtil') && \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled();
 
@@ -363,24 +370,23 @@ class Xophz_Compass_Bazaar_Admin_Sales{
     $status_col = $hpos_enabled ? "status" : "post_status";
     $order_id_col = $hpos_enabled ? "id" : "ID";
 
-    // max( CASE WHEN oim.meta_key = 'SKU' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as sku,
     $sql = "
       Select
         itemName as Product,
-        pm.meta_value as SKU,
+        COALESCE(pm.meta_value, '') as SKU,
         sum(Qty) as Sold,
-        sum(( (Qty * pm3.meta_value) )) as Gross,
-        sum(( (Qty * pm3.meta_value) - lineTotal) ) as Discount,
+        sum(( (Qty * COALESCE(pm3.meta_value, 0)) )) as Gross,
+        sum(( (Qty * COALESCE(pm3.meta_value, 0)) - lineTotal) ) as Discount,
         sum(lineTotal) as Sales,
-        pm2.meta_value as Stock,
-        pm3.meta_value as PriceTag,
-        (pm2.meta_value * pm3.meta_value) as StockValue
+        COALESCE(pm2.meta_value, 0) as Stock,
+        COALESCE(pm3.meta_value, 0) as PriceTag,
+        (COALESCE(pm2.meta_value, 0) * COALESCE(pm3.meta_value, 0)) as StockValue
       FROM
       (
         Select 
-        *, -- all data in select below
+        *, 
         (subtotal - lineTotal) as discount,
-        CASE WHEN variationID != 0 THEN variationID ELSE productID END as post_id -- get single id for variation or simple
+        CASE WHEN variationID != 0 THEN variationID ELSE productID END as post_id
         From 
         (
           SELECT 
@@ -401,7 +407,7 @@ class Xophz_Compass_Bazaar_Admin_Sales{
           LEFT JOIN 
           {$wpdb->prefix}woocommerce_order_items oi on p.{$order_id_col} = oi.order_id		
           LEFT JOIN 
-          {$wpdb->prefix}woocommerce_order_itemmeta as oim on 	oi.order_item_id = oim.order_item_id
+          {$wpdb->prefix}woocommerce_order_itemmeta as oim on oi.order_item_id = oim.order_item_id
         WHERE 
           (
             ( 
@@ -415,18 +421,18 @@ class Xophz_Compass_Bazaar_Admin_Sales{
             )
           )
         AND
-          p.{$status_col} in ('wc-{$status}')
+          p.{$status_col} in ({$status_sql})
         GROUP BY
           oi.order_item_id 
         ORDER BY 
           p.{$date_col} DESC
         ) sales 
       ) sales
-      JOIN 
+      LEFT JOIN 
         {$wpdb->postmeta} as pm on pm.post_id = sales.post_id and pm.meta_key = '_sku'
-      JOIN 
+      LEFT JOIN 
         {$wpdb->postmeta} as pm2 on pm2.post_id = sales.post_id and pm2.meta_key = '_stock'
-      JOIN 
+      LEFT JOIN 
         {$wpdb->postmeta} as pm3 on pm3.post_id = sales.post_id and pm3.meta_key = '_price' 
 
       {$sku}
