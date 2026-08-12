@@ -227,34 +227,51 @@ class Xophz_Compass_Bazaar_Admin_Sales{
           400
         );
 
-      $settings['date'] = $args->date;
+      $settings['date'] = !empty($args->date) ? $args->date : date('Y-m');
       $settings['status'] = $args->status;
-      $settings['sku'] = $args->sku;
-      $settings['sku_scope'] = $args->sku_scope;
-      $settings['gmt'] = $args->gmt;
+      $settings['sku'] = !empty($args->sku) ? $args->sku : '';
+      $settings['sku_scope'] = !empty($args->sku_scope) ? $args->sku_scope : 'start';
+      $settings['gmt'] = !empty($args->gmt) ? $args->gmt : false;
 
       $monthly_sales = Xophz_Compass_Bazaar_Admin_Sales::getMonthlyReportSql($settings);
 
       $sql = "
         SELECT 
-          count(Product) as unique_products,
-          sum(Sold) as total_items_sold,
-          sum(Gross) as gross,
-          sum(Discount) as discounts,
-          ROUND(100*(sum(Discount) / sum(Gross)),1) as discount_percentage,
-          ROUND(sum(StockValue) * (sum(Discount) / sum(Gross) ),1) as projected_discount,
-          sum(StockValue) - ( sum(StockValue) * (sum(Discount) / sum(Gross) ) ) as est_revenue,
-          sum(Sales) as total_sales,
-          sum(Stock) as remaining_stock,
-          sum(StockValue) as in_stock_value,
-          count(case when Stock > 0 then 1 end) as unique_in_stock 
+          COALESCE(count(DISTINCT Product), 0) as unique_products,
+          COALESCE(sum(Sold), 0) as total_items_sold,
+          COALESCE(ROUND(sum(Gross), 2), 0) as gross,
+          COALESCE(ROUND(sum(Discount), 2), 0) as discounts,
+          CASE WHEN sum(Gross) > 0 THEN ROUND(100 * (sum(Discount) / sum(Gross)), 1) ELSE 0 END as discount_percentage,
+          CASE WHEN sum(Gross) > 0 THEN ROUND(sum(StockValue) * (sum(Discount) / sum(Gross)), 1) ELSE 0 END as projected_discount,
+          COALESCE(ROUND(sum(StockValue) - (CASE WHEN sum(Gross) > 0 THEN (sum(StockValue) * (sum(Discount) / sum(Gross))) ELSE 0 END), 2), 0) as est_revenue,
+          COALESCE(ROUND(sum(Sales), 2), 0) as total_sales,
+          COALESCE(sum(Stock), 0) as remaining_stock,
+          COALESCE(ROUND(sum(StockValue), 2), 0) as in_stock_value,
+          COALESCE(count(CASE WHEN Stock > 0 THEN 1 END), 0) as unique_in_stock 
         FROM
         (
           {$monthly_sales}
         ) sales
       "; 
 
-      $sales = $wpdb->get_results($sql)[0];
+      $results = $wpdb->get_results($sql);
+      $sales = !empty($results) ? $results[0] : null;
+
+      if (!$sales || is_null($sales->unique_products)) {
+        $sales = (object)[
+          'unique_products' => 0,
+          'total_items_sold' => 0,
+          'gross' => 0,
+          'discounts' => 0,
+          'discount_percentage' => 0,
+          'projected_discount' => 0,
+          'est_revenue' => 0,
+          'total_sales' => 0,
+          'remaining_stock' => 0,
+          'in_stock_value' => 0,
+          'unique_in_stock' => 0
+        ];
+      }
 
       Xophz_Compass::output_json([
         'sales' => $sales 
@@ -317,17 +334,20 @@ class Xophz_Compass_Bazaar_Admin_Sales{
    *
    * @return void
    */
-  public function getMonthlyReportSql($settings)
+  public static function getMonthlyReportSql($settings)
   {
     global $wpdb;
 
-    $thisMonth  = $settings['date'] . "-01"; 
+    $raw_date = !empty($settings['date']) ? $settings['date'] : date('Y-m');
+    $time = strtotime($raw_date);
+    if ($time === false) {
+      $time = time();
+    }
 
-    $date = new DateTime($thisMonth);
-    $date->modify('first day of next month');
-    $nextMonth = $date->format('Y-m-d');
+    $thisMonth = date('Y-m-01 00:00:00', $time);
+    $nextMonth = date('Y-m-01 00:00:00', strtotime('+1 month', strtotime($thisMonth)));
 
-    $sku = $settings['sku']; 
+    $sku = !empty($settings['sku']) ? trim($settings['sku']) : '';
 
     $raw_status = is_array($settings['status']) ? $settings['status'] : [$settings['status']];
     $status_list = [];
@@ -338,25 +358,29 @@ class Xophz_Compass_Bazaar_Admin_Sales{
     }
     $status_sql = "'" . implode("','", array_unique($status_list)) . "'";
 
-    if($sku){
-      switch( $settings['sku_scope'] ){
+    $sku_where = "";
+    if (!empty($sku)) {
+      $escaped_sku = esc_sql($sku);
+      $scope = !empty($settings['sku_scope']) ? $settings['sku_scope'] : 'start';
+      switch ($scope) {
         case 'contain':
-          $sku = "LIKE '%{$sku}%'";
-        break;
+          $sku_clause = "LIKE '%{$escaped_sku}%'";
+          break;
         case 'exact':
-          $sku = "= '{$sku}'";
-        break;
+          $sku_clause = "= '{$escaped_sku}'";
+          break;
         case 'not':
-          $sku = "NOT LIKE '%{$sku}%'";
-        break;
-        case 'start':
-          $sku = "LIKE '{$sku}%'";
-        break;
+          $sku_clause = "NOT LIKE '%{$escaped_sku}%'";
+          break;
         case 'end':
-          $sku = "LIKE '%{$sku}'";
-        break;
+          $sku_clause = "LIKE '%{$escaped_sku}'";
+          break;
+        case 'start':
+        default:
+          $sku_clause = "LIKE '{$escaped_sku}%'";
+          break;
       }
-      $sku = " WHERE COALESCE(pm.meta_value, '') {$sku} ";
+      $sku_where = " WHERE COALESCE(pm.meta_value, '') {$sku_clause} ";
     }
 
     $gmt = !empty($settings['gmt']) ? '_gmt' : '';
@@ -370,81 +394,82 @@ class Xophz_Compass_Bazaar_Admin_Sales{
     $status_col = $hpos_enabled ? "status" : "post_status";
     $order_id_col = $hpos_enabled ? "id" : "ID";
 
+    $type_filter = $hpos_enabled ? "p.type IN ('shop_order', 'shop_order_refund')" : "p.post_type IN ('shop_order', 'shop_order_refund')";
+
     $sql = "
-      Select
+      SELECT
         itemName as Product,
         COALESCE(pm.meta_value, '') as SKU,
         sum(Qty) as Sold,
-        sum(( (Qty * COALESCE(pm3.meta_value, 0)) )) as Gross,
-        sum(( (Qty * COALESCE(pm3.meta_value, 0)) - lineTotal) ) as Discount,
+        sum( (Qty * COALESCE(pm3.meta_value, subtotal/NULLIF(Qty,0), 0)) ) as Gross,
+        sum( ( (Qty * COALESCE(pm3.meta_value, subtotal/NULLIF(Qty,0), 0)) - lineTotal) ) as Discount,
         sum(lineTotal) as Sales,
         COALESCE(pm2.meta_value, 0) as Stock,
         COALESCE(pm3.meta_value, 0) as PriceTag,
         (COALESCE(pm2.meta_value, 0) * COALESCE(pm3.meta_value, 0)) as StockValue
       FROM
       (
-        Select 
-        *, 
-        (subtotal - lineTotal) as discount,
-        CASE WHEN variationID != 0 THEN variationID ELSE productID END as post_id
-        From 
+        SELECT 
+          *, 
+          (subtotal - lineTotal) as discount,
+          CASE WHEN variationID != 0 AND variationID IS NOT NULL THEN variationID ELSE productID END as post_id
+        FROM 
         (
           SELECT 
             oi.order_id as orderId,
             oi.order_item_id as itemId,
             oi.order_item_name as itemName,
             oi.order_item_type as itemType,
-            max( CASE WHEN oim.meta_key = '_product_id' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as productID, 
-            max( CASE WHEN oim.meta_key = '_qty' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as Qty,
-            max( CASE WHEN oim.meta_key = '_variation_id' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as variationID,
-            max( CASE WHEN oim.meta_key = '_line_total' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as lineTotal,
-            max( CASE WHEN oim.meta_key = '_line_subtotal_tax' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as subTotalTax,
-            max( CASE WHEN oim.meta_key = '_line_tax' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as Tax,
-            max( CASE WHEN oim.meta_key = '_tax_class' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as taxClass,
-            max( CASE WHEN oim.meta_key = '_line_subtotal' and oi.order_item_id = oim.order_item_id THEN oim.meta_value END ) as subtotal
-        FROM
-          {$orders_table} p 
-          LEFT JOIN 
-          {$wpdb->prefix}woocommerce_order_items oi on p.{$order_id_col} = oi.order_id		
-          LEFT JOIN 
-          {$wpdb->prefix}woocommerce_order_itemmeta as oim on oi.order_item_id = oim.order_item_id
-        WHERE 
-          (
-            ( 
-              p.{$date_col} BETWEEN '{$thisMonth}' AND '{$nextMonth}' 
-            ) 
-            OR
+            max( CASE WHEN oim.meta_key = '_product_id' THEN oim.meta_value END ) as productID, 
+            max( CASE WHEN oim.meta_key = '_qty' THEN CAST(oim.meta_value AS UNSIGNED) END ) as Qty,
+            max( CASE WHEN oim.meta_key = '_variation_id' THEN CAST(oim.meta_value AS UNSIGNED) END ) as variationID,
+            max( CASE WHEN oim.meta_key = '_line_total' THEN CAST(oim.meta_value AS DECIMAL(10,2)) END ) as lineTotal,
+            max( CASE WHEN oim.meta_key = '_line_subtotal_tax' THEN CAST(oim.meta_value AS DECIMAL(10,2)) END ) as subTotalTax,
+            max( CASE WHEN oim.meta_key = '_line_tax' THEN CAST(oim.meta_value AS DECIMAL(10,2)) END ) as Tax,
+            max( CASE WHEN oim.meta_key = '_tax_class' THEN oim.meta_value END ) as taxClass,
+            max( CASE WHEN oim.meta_key = '_line_subtotal' THEN CAST(oim.meta_value AS DECIMAL(10,2)) END ) as subtotal
+          FROM
+            {$orders_table} p 
+            INNER JOIN 
+            {$wpdb->prefix}woocommerce_order_items oi ON p.{$order_id_col} = oi.order_id AND oi.order_item_type = 'line_item'
+            LEFT JOIN 
+            {$wpdb->prefix}woocommerce_order_itemmeta as oim ON oi.order_item_id = oim.order_item_id
+          WHERE 
+            {$type_filter}
+            AND
             (
-              p.{$modified_col} BETWEEN '{$thisMonth}' AND '{$nextMonth}'
-              AND
-              p.{$type_col} = 'shop_order_refund'
+              ( 
+                p.{$date_col} >= '{$thisMonth}' AND p.{$date_col} < '{$nextMonth}'
+              ) 
+              OR
+              (
+                p.{$modified_col} >= '{$thisMonth}' AND p.{$modified_col} < '{$nextMonth}'
+                AND
+                p.{$type_col} = 'shop_order_refund'
+              )
             )
-          )
-        AND
-          p.{$status_col} in ({$status_sql})
-        GROUP BY
-          oi.order_item_id 
-        ORDER BY 
-          p.{$date_col} DESC
-        ) sales 
+            AND
+            p.{$status_col} IN ({$status_sql})
+          GROUP BY
+            oi.order_item_id 
+        ) raw_items
       ) sales
       LEFT JOIN 
-        {$wpdb->postmeta} as pm on pm.post_id = sales.post_id and pm.meta_key = '_sku'
+        {$wpdb->postmeta} as pm ON pm.post_id = sales.post_id AND pm.meta_key = '_sku'
       LEFT JOIN 
-        {$wpdb->postmeta} as pm2 on pm2.post_id = sales.post_id and pm2.meta_key = '_stock'
+        {$wpdb->postmeta} as pm2 ON pm2.post_id = sales.post_id AND pm2.meta_key = '_stock'
       LEFT JOIN 
-        {$wpdb->postmeta} as pm3 on pm3.post_id = sales.post_id and pm3.meta_key = '_price' 
+        {$wpdb->postmeta} as pm3 ON pm3.post_id = sales.post_id AND pm3.meta_key = '_price' 
 
-      {$sku}
+      {$sku_where}
 
       GROUP BY
-        SKU
+        sales.post_id, SKU
       ORDER BY 
         Sales DESC
-
     ";
-    return $sql;
 
+    return $sql;
   }
   
 }

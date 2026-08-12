@@ -1,12 +1,12 @@
-# Xophz Bazaar Foresight
+# Xophz Bazaar Warehouse
 
 > **Category:** Command Deck · **Version:** 1.0.0
 
 A supercharged UI for managing WooCommerce inventory, orders, and viewing sales data in real time.
 
-## Description
+## Xophz Bazaar Warehouse
 
-**Bazaar Foresight** is the commerce command center for COMPASS. It wraps WooCommerce's sprawling admin into a streamlined, glassmorphic dashboard where store operators can manage products, monitor orders, and track revenue — all from a single, responsive interface.
+**Bazaar Warehouse** is the commerce command center for COMPASS. It wraps WooCommerce's sprawling admin into a streamlined, glassmorphic dashboard where store operators can manage products, monitor orders, and track revenue — all from a single, responsive interface.
 
 ### Core Capabilities
 

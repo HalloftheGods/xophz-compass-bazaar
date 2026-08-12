@@ -782,16 +782,28 @@ class Xophz_Compass_Bazaar_Admin_Orders {
   }
 
   public static function getOrderIds($args){
+    $query_args = (array) $args;
+
     $default = [
       'return'    => 'ids',
-      'paginate'  => true
+      'paginate'  => true,
+      'status'    => 'any',
+      'type'      => 'shop_order',
     ];
+
+    if (!empty($query_args['limit'])) {
+      $default['limit'] = intval($query_args['limit']);
+    }
+    if (!empty($query_args['page'])) {
+      $default['page'] = intval($query_args['page']);
+    }
 
     if ( ! function_exists( 'wc_get_orders' ) ) {
         return (object) [ 'orders' => [], 'total' => 0, 'max_num_pages' => 0 ];
     }
 
-    return wc_get_orders( array_merge($default, (array) $args) );
+    $final_args = array_merge($default, $query_args);
+    return wc_get_orders( $final_args );
   }
 }
 

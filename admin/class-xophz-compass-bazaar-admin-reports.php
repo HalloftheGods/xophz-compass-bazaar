@@ -239,6 +239,8 @@ class Xophz_Compass_Bazaar_Admin_Reports{
         $labels = array_column($fallback_results, 'month');
         $posts = array_map('intval', array_column($fallback_results, 'total_posts'));
         $total_posts = array_sum($posts);
+        $views = $posts;
+        $total_views = $total_posts;
       }
     }
 

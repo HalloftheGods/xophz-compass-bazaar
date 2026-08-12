@@ -15,9 +15,9 @@
  * @wordpress-plugin
  * Category:          Command Deck
  * Group:             POS
- * Plugin Name:       Xophz Bazaar Foresight
+ * Plugin Name:       Xophz Bazaar Warehouse
  * Plugin URI:        https://github.com/HalloftheGods/xophz-compass-bazaar
- * Description:       This supercharged UI helps you quickly manage your woocommerce inventory, orders, and view sales data in real time.
+ * Description:       Manage inventory stock levels, order fulfillment, point of sale transactions, and financial revenue analytics in real time.
  * Version:           26.8.12.1358
  * Author:            Hall of the Gods, Inc.
  * Author URI:        http://example.com/
@@ -95,7 +95,7 @@ function run_xophz_compass_bazaar() {
     }
 
     function admin_notice_xophz_compass_bazaar() {
-      echo '<div class="error"><h2><strong>Xophz Bazaar Foresight</strong> requires Compass to run. It has self <strong>deactivated</strong>.</h2></div>';
+      echo '<div class="error"><h2><strong>Xophz Bazaar Warehouse</strong> requires Compass to run. It has self <strong>deactivated</strong>.</h2></div>';
       if ( isset( $_GET['activate'] ) )
         unset( $_GET['activate'] );
     }

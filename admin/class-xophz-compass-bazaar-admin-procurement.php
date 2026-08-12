@@ -21,6 +21,7 @@ class Xophz_Compass_Bazaar_Admin_Procurement {
 		$this->action_hooks = [
 			'init' => 'register_cpts',
 			'wp_ajax_bazaar_get_suppliers' => 'get_suppliers',
+			'wp_ajax_bazaar_create_supplier' => 'create_supplier',
 			'wp_ajax_bazaar_get_pos' => 'get_pos',
 			'wp_ajax_bazaar_create_po' => 'create_po',
 			'wp_ajax_bazaar_receive_po' => 'receive_po',
@@ -78,17 +79,107 @@ class Xophz_Compass_Bazaar_Admin_Procurement {
 		if ( $query->have_posts() ) {
 			while ( $query->have_posts() ) {
 				$query->the_post();
+				$id = get_the_ID();
+				$email = get_post_meta( $id, '_supplier_email', true );
+				$phone = get_post_meta( $id, '_supplier_phone', true );
+				$company = get_post_meta( $id, '_supplier_company', true );
+				$wp_user_id = get_post_meta( $id, '_supplier_wp_user_id', true );
+
+				// Check WP user mapping
+				$user_data = null;
+				if ( !empty($wp_user_id) ) {
+					$user = get_userdata( intval($wp_user_id) );
+					if ( $user ) {
+						$user_data = array(
+							'id' => $user->ID,
+							'display_name' => $user->display_name,
+							'user_email' => $user->user_email,
+						);
+					}
+				}
+
 				$suppliers[] = array(
-					'id'    => get_the_ID(),
-					'name'  => get_the_title(),
-					'email' => get_post_meta( get_the_ID(), '_supplier_email', true ),
-					'phone' => get_post_meta( get_the_ID(), '_supplier_phone', true ),
+					'id'         => $id,
+					'name'       => get_the_title(),
+					'company'    => !empty($company) ? $company : get_the_title(),
+					'email'      => $email,
+					'phone'      => $phone,
+					'wp_user_id' => intval($wp_user_id),
+					'user_data'  => $user_data,
+					'has_crm'    => post_type_exists('questbook_contact') || post_type_exists('questbook_company'),
 				);
 			}
 			wp_reset_postdata();
 		}
 
 		wp_send_json_success( array( 'suppliers' => $suppliers ) );
+	}
+
+	public function create_supplier() {
+		$name = isset($_POST['name']) ? sanitize_text_field($_POST['name']) : '';
+		$company = isset($_POST['company']) ? sanitize_text_field($_POST['company']) : '';
+		$email = isset($_POST['email']) ? sanitize_email($_POST['email']) : '';
+		$phone = isset($_POST['phone']) ? sanitize_text_field($_POST['phone']) : '';
+		$wp_user_id = isset($_POST['wp_user_id']) ? intval($_POST['wp_user_id']) : 0;
+
+		if ( empty($name) && empty($company) ) {
+			wp_send_json_error( array( 'message' => 'Supplier name or company is required.' ) );
+		}
+
+		$title = !empty($name) ? $name : $company;
+
+		$supplier_id = wp_insert_post( array(
+			'post_type'   => 'bazaar_supplier',
+			'post_title'  => $title,
+			'post_status' => 'publish',
+		) );
+
+		if ( is_wp_error( $supplier_id ) ) {
+			wp_send_json_error( array( 'message' => 'Failed to create supplier.' ) );
+		}
+
+		// Auto-link existing WP User by email if not explicitly provided
+		if ( empty($wp_user_id) && !empty($email) ) {
+			$existing_user = get_user_by('email', $email);
+			if ( $existing_user ) {
+				$wp_user_id = $existing_user->ID;
+			}
+		}
+
+		update_post_meta( $supplier_id, '_supplier_company', $company );
+		update_post_meta( $supplier_id, '_supplier_email', $email );
+		update_post_meta( $supplier_id, '_supplier_phone', $phone );
+		update_post_meta( $supplier_id, '_supplier_wp_user_id', $wp_user_id );
+
+		// Optional Graceful CRM Linking (only if Questbook CRM is active)
+		if ( post_type_exists('questbook_company') && !empty($company) ) {
+			$crm_company_id = wp_insert_post( array(
+				'post_type'   => 'questbook_company',
+				'post_title'  => $company,
+				'post_status' => 'publish',
+			) );
+			if ( !is_wp_error($crm_company_id) ) {
+				update_post_meta( $supplier_id, '_supplier_crm_company_id', $crm_company_id );
+			}
+		}
+
+		if ( post_type_exists('questbook_contact') && !empty($email) ) {
+			$crm_contact_id = wp_insert_post( array(
+				'post_type'   => 'questbook_contact',
+				'post_title'  => $title,
+				'post_status' => 'publish',
+			) );
+			if ( !is_wp_error($crm_contact_id) ) {
+				update_post_meta( $crm_contact_id, '_contact_email', $email );
+				update_post_meta( $crm_contact_id, '_contact_phone', $phone );
+				update_post_meta( $supplier_id, '_supplier_crm_contact_id', $crm_contact_id );
+			}
+		}
+
+		wp_send_json_success( array(
+			'supplier_id' => $supplier_id,
+			'message'     => 'Supplier created successfully.'
+		) );
 	}
 
 	public function get_pos() {
