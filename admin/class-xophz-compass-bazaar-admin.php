@@ -252,6 +252,144 @@ class Xophz_Compass_Bazaar_Admin {
     }
   }
 
+  public function importProductsCsv() {
+    try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_products')) {
+        Xophz_Compass::output_json(['success' => false, 'message' => 'Permission denied.']);
+        return;
+      }
+
+      $args = Xophz_Compass::get_input_json();
+      $products = isset($args->products) ? $args->products : [];
+
+      if (is_string($products)) {
+        $products = json_decode($products, true);
+      }
+
+      if (empty($products) || !is_array($products)) {
+        Xophz_Compass::output_json(['success' => false, 'message' => 'No product rows provided.']);
+        return;
+      }
+
+      $created_count = 0;
+      $updated_count = 0;
+      $skipped_count = 0;
+      $errors = [];
+
+      foreach ($products as $index => $pData) {
+        $pObj = is_object($pData) ? $pData : (object) $pData;
+        $title = isset($pObj->title) ? trim(sanitize_text_field($pObj->title)) : '';
+        if (empty($title)) {
+          $skipped_count++;
+          $errors[] = "Row #" . ($index + 1) . ": Skipped due to missing title.";
+          continue;
+        }
+
+        $sku = isset($pObj->sku) ? trim(sanitize_text_field($pObj->sku)) : '';
+        $existing_id = 0;
+
+        if ($sku) {
+          $existing_id = wc_get_product_id_by_sku($sku);
+        }
+
+        if (!$existing_id) {
+          $page = get_page_by_title($title, OBJECT, 'product');
+          if ($page) {
+            $existing_id = $page->ID;
+          }
+        }
+
+        $product = $existing_id > 0 ? wc_get_product($existing_id) : new WC_Product_Simple();
+        if (!$product) {
+          $skipped_count++;
+          $errors[] = "Row #" . ($index + 1) . ": Failed to load product instance.";
+          continue;
+        }
+
+        $is_new = ($existing_id === 0);
+
+        $product->set_name($title);
+        if ($sku) {
+          $product->set_sku($sku);
+        }
+
+        if (isset($pObj->regular_price) && $pObj->regular_price !== '') {
+          $product->set_regular_price(wc_format_decimal($pObj->regular_price));
+        }
+
+        if (isset($pObj->sale_price) && $pObj->sale_price !== '') {
+          $product->set_sale_price(wc_format_decimal($pObj->sale_price));
+        }
+
+        if (isset($pObj->description)) {
+          $product->set_description(wp_kses_post($pObj->description));
+        }
+
+        if (isset($pObj->short_description)) {
+          $product->set_short_description(wp_kses_post($pObj->short_description));
+        }
+
+        if (isset($pObj->stock_quantity) && $pObj->stock_quantity !== '') {
+          $product->set_manage_stock(true);
+          $product->set_stock_quantity(intval($pObj->stock_quantity));
+        }
+
+        if (isset($pObj->stock_status) && !empty($pObj->stock_status)) {
+          $status = strtolower(trim($pObj->stock_status));
+          if (in_array($status, ['instock', 'outofstock', 'onbackorder'])) {
+            $product->set_stock_status($status);
+          }
+        }
+
+        if (isset($pObj->categories) && !empty($pObj->categories)) {
+          $cat_names = array_map('trim', explode(',', $pObj->categories));
+          $cat_ids = [];
+          foreach ($cat_names as $cname) {
+            if (empty($cname)) continue;
+            $term = get_term_by('name', $cname, 'product_cat');
+            if (!$term) {
+              $term_res = wp_insert_term($cname, 'product_cat');
+              if (!is_wp_error($term_res) && isset($term_res['term_id'])) {
+                $cat_ids[] = intval($term_res['term_id']);
+              }
+            } else {
+              $cat_ids[] = intval($term->term_id);
+            }
+          }
+          if (!empty($cat_ids)) {
+            $product->set_category_ids($cat_ids);
+          }
+        }
+
+        if ($is_new) {
+          $product->set_status('publish');
+        }
+
+        $saved_id = $product->save();
+        if ($saved_id) {
+          if ($is_new) {
+            $created_count++;
+          } else {
+            $updated_count++;
+          }
+        } else {
+          $skipped_count++;
+          $errors[] = "Row #" . ($index + 1) . " ({$title}): Failed to save product.";
+        }
+      }
+
+      Xophz_Compass::output_json([
+        'success' => true,
+        'created_count' => $created_count,
+        'updated_count' => $updated_count,
+        'skipped_count' => $skipped_count,
+        'errors' => $errors
+      ]);
+    } catch (\Throwable $e) {
+      Xophz_Compass::output_json(['success' => false, 'message' => $e->getMessage()]);
+    }
+  }
+
 
   public function updateProductStock(){
     $args = Xophz_Compass::get_input_json();
