@@ -138,6 +138,11 @@ class Xophz_Compass_Bazaar {
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-bazaar-twilio.php';
 
     /**
+      * The class responsible for multi-inventory and warehouse management
+    */
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-bazaar-admin-multi-inventory.php';
+
+    /**
       * The class responsible for products 
     */
     // require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-bazaar-admin.php';
@@ -203,6 +208,7 @@ class Xophz_Compass_Bazaar {
     $this->define_class_hooks('Xophz_Compass_Bazaar_Admin_Reports');
     $this->define_class_hooks('Xophz_Compass_Bazaar_Admin_Procurement');
     $this->define_class_hooks('Xophz_Compass_Bazaar_Twilio');
+    $this->define_class_hooks('Xophz_Compass_Bazaar_Admin_Multi_Inventory');
   } 
 
   public function define_class_hooks($class){

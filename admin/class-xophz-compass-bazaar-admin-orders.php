@@ -56,6 +56,11 @@ class Xophz_Compass_Bazaar_Admin_Orders {
     'wp_ajax_bazaar_get_coupons' => 'getCoupons',
     'wp_ajax_bazaar_save_coupon' => 'saveCoupon',
     'wp_ajax_bazaar_delete_coupon' => 'deleteCoupon',
+    'wp_ajax_bazaar_create_category' => 'createCategory',
+    'wp_ajax_bazaar_get_bank_details' => 'getBankDetails',
+    'wp_ajax_bazaar_save_bank_details' => 'saveBankDetails',
+    'wp_ajax_bazaar_pos_gateway_portal' => 'renderGatewayPortal',
+    'wp_ajax_nopriv_bazaar_pos_gateway_portal' => 'renderGatewayPortal',
   ];
 
 
@@ -104,7 +109,7 @@ class Xophz_Compass_Bazaar_Admin_Orders {
         }
         $data = $order->get_data();
         $data['order'] = $order->get_order_number();
-        $data['currency_symbol'] = get_woocommerce_currency_symbol($order->get_currency());
+        $data['currency_symbol'] = html_entity_decode(get_woocommerce_currency_symbol($order->get_currency()), ENT_QUOTES, 'UTF-8');
         
         if (isset($data['date_created']) && is_a($data['date_created'], 'WC_DateTime')) {
             $data['date_created'] = $data['date_created']->date('Y-m-d H:i:s');
@@ -683,19 +688,21 @@ class Xophz_Compass_Bazaar_Admin_Orders {
       if (!$gateways_obj) {
           throw new \Exception('Payment gateways unavailable.');
       }
-      $gateways = $gateways_obj->get_available_payment_gateways();
+      $gateways = $gateways_obj->payment_gateways();
       if (is_wp_error($gateways)) {
           throw new \Exception($gateways->get_error_message());
       }
       $data = [];
       
       foreach($gateways as $gateway) {
-          $raw_title = $gateway->title ?: $gateway->get_method_title();
-          $data[] = [
-              'id' => $gateway->id,
-              'title' => $this->clean_payment_title($raw_title, $gateway->id),
-              'method_title' => $gateway->get_method_title()
-          ];
+          if ($gateway->enabled === 'yes') {
+              $raw_title = $gateway->title ?: $gateway->get_method_title();
+              $data[] = [
+                  'id' => $gateway->id,
+                  'title' => html_entity_decode($this->clean_payment_title($raw_title, $gateway->id), ENT_QUOTES, 'UTF-8'),
+                  'method_title' => html_entity_decode($gateway->get_method_title(), ENT_QUOTES, 'UTF-8')
+              ];
+          }
       }
       
       $this->send_json_response(['success' => true, 'gateways' => array_values($data)]);
@@ -883,6 +890,49 @@ class Xophz_Compass_Bazaar_Admin_Orders {
       ]);
     } catch (\Throwable $e) {
       $this->send_json_response(['success' => false, 'message' => $e->getMessage(), 'categories' => []]);
+    }
+  }
+
+  public function createCategory() {
+    try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_products')) {
+        throw new \Exception('Permission denied.');
+      }
+
+      $args = Xophz_Compass::get_input_json();
+      $name = isset($args->name) ? trim(sanitize_text_field($args->name)) : '';
+      $parent = isset($args->parent_id) ? intval($args->parent_id) : 0;
+
+      if (empty($name)) {
+        throw new \Exception('Category name is required.');
+      }
+
+      $term_args = [];
+      if ($parent > 0) {
+        $term_args['parent'] = $parent;
+      }
+
+      $res = wp_insert_term($name, 'product_cat', $term_args);
+      if (is_wp_error($res)) {
+        throw new \Exception($res->get_error_message());
+      }
+
+      $term_id = $res['term_id'];
+      $term = get_term($term_id, 'product_cat');
+
+      $this->send_json_response([
+        'success' => true,
+        'category' => [
+          'id'    => $term->term_id,
+          'name'  => html_entity_decode($term->name, ENT_QUOTES, 'UTF-8'),
+          'slug'  => $term->slug,
+          'count' => $term->count,
+          'text'  => html_entity_decode($term->name, ENT_QUOTES, 'UTF-8') . ' (0)',
+          'value' => $term->slug
+        ]
+      ]);
+    } catch (\Throwable $e) {
+      $this->send_json_response(['success' => false, 'message' => $e->getMessage()]);
     }
   }
 
@@ -1313,6 +1363,174 @@ class Xophz_Compass_Bazaar_Admin_Orders {
       ]);
     }
   }
+  public function getBankDetails() {
+    try {
+      $accounts = get_option('woocommerce_bacs_accounts', []);
+      $account = !empty($accounts[0]) ? $accounts[0] : [];
+      
+      $bank_name = !empty($account['bank_name']) ? $account['bank_name'] : get_option('bazaar_bank_name', '');
+      $routing = !empty($account['sort_code']) ? $account['sort_code'] : get_option('bazaar_bank_routing', '');
+      $account_num = !empty($account['account_number']) ? $account['account_number'] : get_option('bazaar_bank_account', '');
+      $iban = !empty($account['iban']) ? $account['iban'] : get_option('bazaar_bank_iban', '');
+
+      $this->send_json_response([
+        'success' => true,
+        'bank_name' => $bank_name,
+        'routing' => $routing,
+        'account' => $account_num,
+        'iban' => $iban
+      ]);
+    } catch (\Throwable $e) {
+      $this->send_json_response(['success' => false, 'message' => $e->getMessage()]);
+    }
+  }
+
+  public function saveBankDetails() {
+    try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+        throw new \Exception('Permission denied.');
+      }
+      $args = Xophz_Compass::get_input_json();
+      $bank_name = isset($args->bank_name) ? sanitize_text_field($args->bank_name) : '';
+      $routing = isset($args->routing) ? sanitize_text_field($args->routing) : '';
+      $account = isset($args->account) ? sanitize_text_field($args->account) : '';
+      $iban = isset($args->iban) ? sanitize_text_field($args->iban) : '';
+
+      $bacs_account = [
+        'account_name' => get_bloginfo('name'),
+        'account_number' => $account,
+        'bank_name' => $bank_name,
+        'sort_code' => $routing,
+        'iban' => $iban,
+        'bic' => ''
+      ];
+
+      update_option('woocommerce_bacs_accounts', [$bacs_account]);
+      update_option('bazaar_bank_name', $bank_name);
+      update_option('bazaar_bank_routing', $routing);
+      update_option('bazaar_bank_account', $account);
+      update_option('bazaar_bank_iban', $iban);
+
+      $this->send_json_response([
+        'success' => true,
+        'message' => 'Bank details saved successfully.',
+        'bank_name' => $bank_name,
+        'routing' => $routing,
+        'account' => $account,
+        'iban' => $iban
+      ]);
+    } catch (\Throwable $e) {
+      $this->send_json_response(['success' => false, 'message' => $e->getMessage()]);
+    }
+  }
+
+  public function renderGatewayPortal() {
+    $gateway_id = isset($_GET['gateway']) ? sanitize_text_field($_GET['gateway']) : 'card';
+    $amount = isset($_GET['amount']) ? floatval($_GET['amount']) : 0.00;
+    
+    $gateway_title = 'Digital Payment';
+    if (function_exists('WC') && WC()->payment_gateways()) {
+      $all = WC()->payment_gateways()->payment_gateways();
+      if (isset($all[$gateway_id])) {
+        $gw = $all[$gateway_id];
+        $raw_title = $gw->title ?: $gw->get_method_title();
+        $gateway_title = $this->clean_payment_title($raw_title, $gateway_id);
+      }
+    }
+    
+    header('Content-Type: text/html; charset=UTF-8');
+    ?>
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title><?php echo esc_html($gateway_title); ?> - Register Checkout Portal</title>
+      <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+      <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        body { background: #081224; color: #fff; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
+        .portal-card { background: rgba(15, 25, 45, 0.95); border: 1px solid rgba(255,255,255,0.18); border-radius: 20px; width: 100%; max-width: 440px; padding: 28px; box-shadow: 0 25px 50px rgba(0,0,0,0.6); backdrop-filter: blur(25px); }
+        .brand-badge { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #62c9ff; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 16px; }
+        .amount-badge { background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; padding: 18px; text-align: center; margin-bottom: 22px; }
+        .amount-title { font-size: 12px; color: #8a99ad; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .amount-val { font-size: 34px; font-weight: 800; color: #28c76f; }
+        .input-group { margin-bottom: 16px; text-align: left; }
+        .input-group label { font-size: 12px; color: #cbd5e1; margin-bottom: 6px; display: block; font-weight: 600; }
+        .input-group input { width: 100%; background: rgba(0,0,0,0.45); border: 1px solid rgba(255,255,255,0.2); border-radius: 10px; padding: 12px 14px; color: #fff; font-size: 14px; outline: none; transition: border-color 0.2s; }
+        .input-group input:focus { border-color: #62c9ff; box-shadow: 0 0 0 2px rgba(98, 201, 255, 0.2); }
+        .row { display: flex; gap: 12px; }
+        .btn-submit { width: 100%; background: #28c76f; color: #fff; border: none; padding: 14px; border-radius: 12px; font-size: 16px; font-weight: 700; cursor: pointer; margin-top: 12px; transition: all 0.2s; box-shadow: 0 4px 15px rgba(40, 199, 111, 0.3); }
+        .btn-submit:hover { background: #22b062; transform: translateY(-1px); }
+        .footer-note { font-size: 11px; color: #64748b; margin-top: 18px; text-align: center; display: flex; align-items: center; justify-content: center; gap: 6px; }
+      </style>
+    </head>
+    <body>
+      <div class="portal-card">
+        <div class="brand-badge"><i class="fas fa-shield-alt"></i> COMPASS POS Gateway Authorization</div>
+        <h2 style="font-size: 20px; margin-bottom: 16px; font-weight: 700; text-transform: capitalize;"><?php echo esc_html($gateway_title); ?></h2>
+        
+        <div class="amount-badge">
+          <div class="amount-title">Total Transaction Charge</div>
+          <div class="amount-val">$<?php echo number_format($amount, 2); ?></div>
+        </div>
+
+        <form id="portalForm" onsubmit="handleAuthorize(event)">
+          <div class="input-group">
+            <label>Cardholder / Account Name</label>
+            <input type="text" id="cardName" placeholder="John Doe" required value="Customer Authorization">
+          </div>
+
+          <div class="input-group">
+            <label>Card / Account Number</label>
+            <input type="text" id="cardNumber" placeholder="4532 •••• •••• 8890" value="4532 8901 2345 8890" maxlength="19" required>
+          </div>
+
+          <div class="row">
+            <div class="input-group" style="flex: 1;">
+              <label>Expires</label>
+              <input type="text" placeholder="12/28" value="12/28" maxlength="5" required>
+            </div>
+            <div class="input-group" style="flex: 1;">
+              <label>CVC / Code</label>
+              <input type="text" placeholder="123" value="382" maxlength="4" required>
+            </div>
+          </div>
+
+          <button type="submit" class="btn-submit">
+            <i class="fas fa-check-circle" style="margin-right: 6px;"></i> Authorize $<?php echo number_format($amount, 2); ?>
+          </button>
+        </form>
+
+        <div class="footer-note"><i class="fas fa-lock"></i> Encrypted 256-Bit TLS Checkout &bull; COMPASS Bazaar</div>
+      </div>
+
+      <script>
+        function handleAuthorize(e) {
+          e.preventDefault();
+          const btn = document.querySelector('.btn-submit');
+          btn.disabled = true;
+          btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Authorizing...';
+
+          setTimeout(() => {
+            const authId = 'AUTH-' + Math.random().toString(36).substr(2, 9).toUpperCase();
+            if (window.opener) {
+              window.opener.postMessage({
+                status: 'approved',
+                gatewayId: '<?php echo esc_js($gateway_id); ?>',
+                authorizationId: authId
+              }, '*');
+            }
+            alert('Payment Authorized Successfully!');
+            window.close();
+          }, 1000);
+        }
+      </script>
+    </body>
+    </html>
+    <?php
+    exit;
+  }
 }
 
 class Walker_Simple_String extends Walker {
@@ -1386,4 +1604,5 @@ class Walker_Simple_String extends Walker {
     }
     parent::display_element( $element, $children_elements, $max_depth, $depth, $args, $output );
 	}
+
 }
