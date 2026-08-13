@@ -54,11 +54,8 @@ class Xophz_Compass_Bazaar_Admin_Orders {
     'wp_ajax_get_pos_order_for_refund' => 'getPosOrderForRefund',
     'wp_ajax_process_pos_refund' => 'processPosRefund',
     'wp_ajax_bazaar_get_coupons' => 'getCoupons',
-    'wp_ajax_nopriv_bazaar_get_coupons' => 'getCoupons',
     'wp_ajax_bazaar_save_coupon' => 'saveCoupon',
-    'wp_ajax_nopriv_bazaar_save_coupon' => 'saveCoupon',
     'wp_ajax_bazaar_delete_coupon' => 'deleteCoupon',
-    'wp_ajax_nopriv_bazaar_delete_coupon' => 'deleteCoupon',
   ];
 
 
@@ -74,371 +71,544 @@ class Xophz_Compass_Bazaar_Admin_Orders {
     $this->version = $version;
   }
 
+  /**
+   * Clean active output buffer and emit structured JSON response.
+   *
+   * @param array $payload Response data payload.
+   * @return void
+   */
+  private function send_json_response($payload) {
+      while (ob_get_level() > 0) {
+          @ob_end_clean();
+      }
+      Xophz_Compass::output_json($payload);
+  }
+
   public function getOrders(){
-    $args   = Xophz_Compass::get_input_json();
-    $args->return = 'objects';
-
-    $orderIds = Xophz_Compass_Bazaar_Admin_Orders::getOrderIds($args);
-
-    $mapOrderData = function($id){
-      $order = wc_get_order($id);
-      $data = $order->get_data();
-      $data['order'] = $order->get_order_number();
-      if (isset($data['date_created']) && is_a($data['date_created'], 'WC_DateTime')) {
-          $data['date_created'] = $data['date_created']->date('Y-m-d H:i:s');
+    try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
       }
-      
-      $cashier_id = $order->get_meta('_pos_cashier_id');
-      if ($cashier_id) {
-          $cashier = get_userdata($cashier_id);
-          if ($cashier) {
-              $data['cashier_name'] = $cashier->display_name;
-          }
+      $args   = Xophz_Compass::get_input_json();
+      $args->return = 'objects';
+
+      $orderIds = Xophz_Compass_Bazaar_Admin_Orders::getOrderIds($args);
+      if (is_wp_error($orderIds)) {
+          throw new \Exception($orderIds->get_error_message());
       }
-      
-      return $data;
-    };
 
-    $orders_data = array_map( $mapOrderData, $orderIds->orders );
+      $mapOrderData = function($id){
+        $order = wc_get_order($id);
+        if (!$order || is_wp_error($order)) {
+            return null;
+        }
+        $data = $order->get_data();
+        $data['order'] = $order->get_order_number();
+        if (isset($data['date_created']) && is_a($data['date_created'], 'WC_DateTime')) {
+            $data['date_created'] = $data['date_created']->date('Y-m-d H:i:s');
+        }
+        
+        $cashier_id = $order->get_meta('_pos_cashier_id');
+        if ($cashier_id) {
+            $cashier = get_userdata($cashier_id);
+            if ($cashier) {
+                $data['cashier_name'] = $cashier->display_name;
+            }
+        }
+        
+        return $data;
+      };
 
-    Xophz_Compass::output_json([
-      'total_count' => (int) $orderIds->total, 
-      'data'        => $orders_data
-    ]);
+      $raw_orders = isset($orderIds->orders) && is_array($orderIds->orders) ? $orderIds->orders : [];
+      $orders_data = array_values(array_filter(array_map( $mapOrderData, $raw_orders )));
+
+      $this->send_json_response([
+        'success'     => true,
+        'total_count' => isset($orderIds->total) ? (int) $orderIds->total : 0, 
+        'data'        => $orders_data
+      ]);
+    } catch (\Throwable $e) {
+      $this->send_json_response([
+        'success' => false,
+        'message' => $e->getMessage()
+      ]);
+    }
   }
 
   public function validatePosCoupon() {
-    $args = Xophz_Compass::get_input_json();
-    $code = isset($args->code) ? sanitize_text_field($args->code) : '';
+    try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
+      }
+      $args = Xophz_Compass::get_input_json();
+      $code = isset($args->code) ? sanitize_text_field($args->code) : '';
 
-    if (!$code) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Coupon code is required.']);
-        return;
+      if (!$code) {
+          $this->send_json_response(['success' => false, 'message' => 'Coupon code is required.']);
+          return;
+      }
+
+      $coupon = new WC_Coupon($code);
+      if (!$coupon->get_id() || !$coupon->is_valid()) {
+          $this->send_json_response(['success' => false, 'message' => 'Invalid or expired coupon code.']);
+          return;
+      }
+
+      $this->send_json_response([
+          'success' => true,
+          'code'    => $coupon->get_code(),
+          'type'    => $coupon->get_discount_type(),
+          'amount'  => $coupon->get_amount(),
+      ]);
+    } catch (\Throwable $e) {
+      $this->send_json_response(['success' => false, 'message' => $e->getMessage()]);
     }
-
-    $coupon = new WC_Coupon($code);
-    if (!$coupon->get_id() || !$coupon->is_valid()) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Invalid or expired coupon code.']);
-        return;
-    }
-
-    Xophz_Compass::output_json([
-        'success' => true,
-        'code' => $coupon->get_code(),
-        'type' => $coupon->get_discount_type(),
-        'amount' => $coupon->get_amount(),
-    ]);
   }
 
   public function sendPosReceipt() {
-    $args = Xophz_Compass::get_input_json();
-    $recipient = isset($args->recipient) ? sanitize_text_field($args->recipient) : '';
-    $order_id = isset($args->order_id) ? intval($args->order_id) : 0;
+    try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
+      }
+      $args = Xophz_Compass::get_input_json();
+      $recipient = isset($args->recipient) ? sanitize_text_field($args->recipient) : '';
+      $order_id = isset($args->order_id) ? intval($args->order_id) : 0;
 
-    if (!$recipient || !$order_id) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Recipient and Order ID are required.']);
-        return;
-    }
+      if (!$recipient || !$order_id) {
+          $this->send_json_response(['success' => false, 'message' => 'Recipient and Order ID are required.']);
+          return;
+      }
 
-    $order = wc_get_order($order_id);
-    if (!$order) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Order not found.']);
-        return;
-    }
+      $order = wc_get_order($order_id);
+      if (!$order || is_wp_error($order)) {
+          $this->send_json_response(['success' => false, 'message' => 'Order not found.']);
+          return;
+      }
 
-    $is_email = strpos($recipient, '@') !== false;
+      $is_email = strpos($recipient, '@') !== false;
 
-    if ($is_email) {
-        $order->set_billing_email($recipient);
-        $order->save();
-        
-        $subscribe_newsletter = isset($args->subscribe_newsletter) ? !empty($args->subscribe_newsletter) : false;
-        if ($subscribe_newsletter) {
-            global $wpdb;
-            $table = $wpdb->prefix . 'bomb_bag_subscribers';
-            $junction = $wpdb->prefix . 'bomb_bag_list_subscribers';
-            
-            // Check if email already exists in Bomb Bag
-            $existing_id = $wpdb->get_var($wpdb->prepare(
-                "SELECT id FROM $table WHERE email = %s", $recipient
-            ));
-            
-            if (!$existing_id) {
-                $wpdb->insert($table, array(
-                    'email'      => $recipient,
-                    'first_name' => $order->get_billing_first_name() ?: '',
-                    'last_name'  => $order->get_billing_last_name() ?: '',
-                    'source'     => 'pos_checkout',
-                    'status'     => 'active'
-                ));
-                $existing_id = $wpdb->insert_id;
-            }
-            
-            if ($existing_id) {
-                // Find the first available list or fallback to 1
-                $lists_table = $wpdb->prefix . 'bomb_bag_lists';
-                $default_list_id = $wpdb->get_var("SELECT id FROM $lists_table ORDER BY id ASC LIMIT 1");
-                
-                if ($default_list_id) {
-                    $wpdb->query($wpdb->prepare(
-                        "INSERT IGNORE INTO $junction (list_id, subscriber_id) VALUES (%d, %d)",
-                        $default_list_id, $existing_id
-                    ));
-                }
-            }
-        }
+      if ($is_email) {
+          $order->set_billing_email($recipient);
+          $save_res = $order->save();
+          if (is_wp_error($save_res)) {
+              throw new \Exception($save_res->get_error_message());
+          }
+          
+          $subscribe_newsletter = isset($args->subscribe_newsletter) ? !empty($args->subscribe_newsletter) : false;
+          if ($subscribe_newsletter) {
+              global $wpdb;
+              $table = $wpdb->prefix . 'bomb_bag_subscribers';
+              $junction = $wpdb->prefix . 'bomb_bag_list_subscribers';
+              
+              // Check if email already exists in Bomb Bag
+              $existing_id = $wpdb->get_var($wpdb->prepare(
+                  "SELECT id FROM $table WHERE email = %s", $recipient
+              ));
+              
+              if (!$existing_id) {
+                  $wpdb->insert($table, array(
+                      'email'      => $recipient,
+                      'first_name' => $order->get_billing_first_name() ?: '',
+                      'last_name'  => $order->get_billing_last_name() ?: '',
+                      'source'     => 'pos_checkout',
+                      'status'     => 'active'
+                  ));
+                  $existing_id = $wpdb->insert_id;
+              }
+              
+              if ($existing_id) {
+                  // Find the first available list or fallback to 1
+                  $lists_table = $wpdb->prefix . 'bomb_bag_lists';
+                  $default_list_id = $wpdb->get_var("SELECT id FROM $lists_table ORDER BY id ASC LIMIT 1");
+                  
+                  if ($default_list_id) {
+                      $wpdb->query($wpdb->prepare(
+                          "INSERT IGNORE INTO $junction (list_id, subscriber_id) VALUES (%d, %d)",
+                          $default_list_id, $existing_id
+                      ));
+                  }
+              }
+          }
 
-        if (function_exists('WC')) {
-            $mailer = WC()->mailer();
-            $invoice_email = isset($mailer->emails['WC_Email_Customer_Invoice']) ? $mailer->emails['WC_Email_Customer_Invoice'] : null;
-            if ($invoice_email) {
-                $invoice_email->trigger($order_id);
-            }
-        }
+          if (function_exists('WC')) {
+              $mailer = WC()->mailer();
+              $invoice_email = isset($mailer->emails['WC_Email_Customer_Invoice']) ? $mailer->emails['WC_Email_Customer_Invoice'] : null;
+              if ($invoice_email) {
+                  $invoice_email->trigger($order_id);
+              }
+          }
 
-        Xophz_Compass::output_json([
-            'success' => true,
-            'type' => 'email',
-            'message' => 'Receipt invoice email sent successfully.'
-        ]);
-    } else {
-        $sanitized_phone = preg_replace('/[^0-9+]/', '', $recipient);
-        
-        do_action('xophz_compass_send_sms_receipt', $sanitized_phone, $order_id);
+          $this->send_json_response([
+              'success' => true,
+              'type'    => 'email',
+              'message' => 'Receipt invoice email sent successfully.'
+          ]);
+      } else {
+          $sanitized_phone = preg_replace('/[^0-9+]/', '', $recipient);
+          
+          do_action('xophz_compass_send_sms_receipt', $sanitized_phone, $order_id);
 
-        Xophz_Compass::output_json([
-            'success' => true,
-            'type' => 'sms',
-            'message' => 'Receipt SMS request dispatched.'
-        ]);
+          $this->send_json_response([
+              'success' => true,
+              'type'    => 'sms',
+              'message' => 'Receipt SMS request dispatched.'
+          ]);
+      }
+    } catch (\Throwable $e) {
+      $this->send_json_response(['success' => false, 'message' => $e->getMessage()]);
     }
   }
 
   public function emailShiftSummary() {
-    $args = Xophz_Compass::get_input_json();
-    $current_user = wp_get_current_user();
-    
-    if (!$current_user || !$current_user->exists()) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Not authenticated.']);
-        return;
+    try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
+      }
+      $args = Xophz_Compass::get_input_json();
+      $current_user = wp_get_current_user();
+      
+      if (!$current_user || !$current_user->exists()) {
+          $this->send_json_response(['success' => false, 'message' => 'Not authenticated.']);
+          return;
+      }
+
+      $cash = isset($args->cash) ? floatval($args->cash) : 0;
+      $card = isset($args->card) ? floatval($args->card) : 0;
+      $coupons = isset($args->coupons) ? floatval($args->coupons) : 0;
+      $customDiscounts = isset($args->customDiscounts) ? floatval($args->customDiscounts) : 0;
+      $totalTips = isset($args->totalTips) ? floatval($args->totalTips) : 0;
+      $totalOrders = isset($args->totalOrders) ? intval($args->totalOrders) : 0;
+      $totalSales = $cash + $card;
+
+      $site_name = get_bloginfo('name');
+      $date_str = current_time('M d, Y, h:i A');
+
+      $html = "
+      <div style='font-family: sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #eaeaea; border-radius: 8px;'>
+          <h2 style='text-align: center; color: #333;'>$site_name - POS Shift Summary</h2>
+          <p style='text-align: center; color: #666; font-size: 14px;'>Report generated: $date_str</p>
+          <hr style='border: none; border-top: 1px solid #eaeaea; margin: 20px 0;'>
+          <table style='width: 100%; border-collapse: collapse;'>
+              <tr><td style='padding: 8px 0; color: #555;'>Total Orders:</td><td style='text-align: right; font-weight: bold;'>$totalOrders</td></tr>
+              <tr><td style='padding: 8px 0; color: #555;'>Cash Tended:</td><td style='text-align: right; font-weight: bold; color: #28a745;'>$" . number_format($cash, 2) . "</td></tr>
+              <tr><td style='padding: 8px 0; color: #555;'>Card/Electronic:</td><td style='text-align: right; font-weight: bold; color: #007bff;'>$" . number_format($card, 2) . "</td></tr>
+              <tr><td style='padding: 8px 0; color: #555;'>Tips Collected:</td><td style='text-align: right; font-weight: bold; color: #20c997;'>+$" . number_format($totalTips, 2) . "</td></tr>
+              <tr><td style='padding: 8px 0; color: #555;'>Coupons Applied:</td><td style='text-align: right; font-weight: bold; color: #ffc107;'>-$" . number_format($coupons, 2) . "</td></tr>
+              <tr><td style='padding: 8px 0; color: #555;'>Custom Discounts:</td><td style='text-align: right; font-weight: bold; color: #ffc107;'>-$" . number_format($customDiscounts, 2) . "</td></tr>
+          </table>
+          <hr style='border: none; border-top: 1px solid #eaeaea; margin: 20px 0;'>
+          <div style='display: flex; justify-content: space-between; font-size: 18px; font-weight: bold;'>
+              <span>Total Shift Sales:</span>
+              <span>$" . number_format($totalSales, 2) . "</span>
+          </div>
+      </div>
+      ";
+
+      $headers = ['Content-Type: text/html; charset=UTF-8'];
+      
+      $recipients = [$current_user->user_email];
+      $cashierId = isset($args->cashierId) ? intval($args->cashierId) : 0;
+      if ($cashierId && $cashierId !== $current_user->ID) {
+          $cashier_user = get_userdata($cashierId);
+          if ($cashier_user && !empty($cashier_user->user_email)) {
+              $recipients[] = $cashier_user->user_email;
+          }
+      }
+
+      $sent = wp_mail($recipients, "POS Shift Summary - $site_name", $html, $headers);
+
+      $this->send_json_response([
+          'success' => (bool)$sent,
+          'message' => $sent ? 'Shift summary emailed to ' . implode(', ', $recipients) : 'Failed to send email.'
+      ]);
+    } catch (\Throwable $e) {
+      $this->send_json_response(['success' => false, 'message' => $e->getMessage()]);
     }
-
-    $cash = isset($args->cash) ? floatval($args->cash) : 0;
-    $card = isset($args->card) ? floatval($args->card) : 0;
-    $coupons = isset($args->coupons) ? floatval($args->coupons) : 0;
-    $customDiscounts = isset($args->customDiscounts) ? floatval($args->customDiscounts) : 0;
-    $totalTips = isset($args->totalTips) ? floatval($args->totalTips) : 0;
-    $totalOrders = isset($args->totalOrders) ? intval($args->totalOrders) : 0;
-    $totalSales = $cash + $card;
-
-    $site_name = get_bloginfo('name');
-    $date_str = current_time('M d, Y, h:i A');
-
-    $html = "
-    <div style='font-family: sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #eaeaea; border-radius: 8px;'>
-        <h2 style='text-align: center; color: #333;'>$site_name - POS Shift Summary</h2>
-        <p style='text-align: center; color: #666; font-size: 14px;'>Report generated: $date_str</p>
-        <hr style='border: none; border-top: 1px solid #eaeaea; margin: 20px 0;'>
-        <table style='width: 100%; border-collapse: collapse;'>
-            <tr><td style='padding: 8px 0; color: #555;'>Total Orders:</td><td style='text-align: right; font-weight: bold;'>$totalOrders</td></tr>
-            <tr><td style='padding: 8px 0; color: #555;'>Cash Tended:</td><td style='text-align: right; font-weight: bold; color: #28a745;'>$" . number_format($cash, 2) . "</td></tr>
-            <tr><td style='padding: 8px 0; color: #555;'>Card/Electronic:</td><td style='text-align: right; font-weight: bold; color: #007bff;'>$" . number_format($card, 2) . "</td></tr>
-            <tr><td style='padding: 8px 0; color: #555;'>Tips Collected:</td><td style='text-align: right; font-weight: bold; color: #20c997;'>+$" . number_format($totalTips, 2) . "</td></tr>
-            <tr><td style='padding: 8px 0; color: #555;'>Coupons Applied:</td><td style='text-align: right; font-weight: bold; color: #ffc107;'>-$" . number_format($coupons, 2) . "</td></tr>
-            <tr><td style='padding: 8px 0; color: #555;'>Custom Discounts:</td><td style='text-align: right; font-weight: bold; color: #ffc107;'>-$" . number_format($customDiscounts, 2) . "</td></tr>
-        </table>
-        <hr style='border: none; border-top: 1px solid #eaeaea; margin: 20px 0;'>
-        <div style='display: flex; justify-content: space-between; font-size: 18px; font-weight: bold;'>
-            <span>Total Shift Sales:</span>
-            <span>$" . number_format($totalSales, 2) . "</span>
-        </div>
-    </div>
-    ";
-
-    $headers = ['Content-Type: text/html; charset=UTF-8'];
-    
-    $recipients = [$current_user->user_email];
-    $cashierId = isset($args->cashierId) ? intval($args->cashierId) : 0;
-    if ($cashierId && $cashierId !== $current_user->ID) {
-        $cashier_user = get_userdata($cashierId);
-        if ($cashier_user && !empty($cashier_user->user_email)) {
-            $recipients[] = $cashier_user->user_email;
-        }
-    }
-
-    $sent = wp_mail($recipients, "POS Shift Summary - $site_name", $html, $headers);
-
-    Xophz_Compass::output_json([
-        'success' => $sent,
-        'message' => $sent ? 'Shift summary emailed to ' . implode(', ', $recipients) : 'Failed to send email.'
-    ]);
   }
 
   public function createPosOrder() {
-    $args = Xophz_Compass::get_input_json();
-    $items = isset($args->items) ? $args->items : [];
-
-    // Parse stringified JSON items array from FormData
-    if (is_string($items)) {
-        $decoded = json_decode($items);
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            $raw_input = file_get_contents('php://input');
-            parse_str($raw_input, $raw_parsed);
-            $decoded = isset($raw_parsed['items']) ? json_decode(stripslashes($raw_parsed['items'])) : [];
-        }
-        $items = $decoded;
-    }
-
-    $discount = isset($args->discount) ? floatval($args->discount) : 0;
-    $customDiscounts = isset($args->customDiscounts) ? $args->customDiscounts : [];
-    $appliedCoupons = isset($args->appliedCoupons) ? $args->appliedCoupons : [];
-    $tipAmount = isset($args->tipAmount) ? floatval($args->tipAmount) : 0;
-    $paymentMethod = isset($args->paymentMethod) ? $args->paymentMethod : 'cash';
-    $splitPayments = isset($args->splitPayments) ? $args->splitPayments : [];
-
-    if (empty($items)) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Cart is empty.']);
-        return;
-    }
-
+    $order = null;
     try {
-        $order = wc_create_order();
-        
-        $customerId = isset($args->customerId) ? intval($args->customerId) : 0;
-        if ($customerId) {
-            $order->set_customer_id($customerId);
-            $customer = new WC_Customer($customerId);
-            if ($customer) {
-                $order->set_billing_first_name($customer->get_billing_first_name() ?: $customer->get_first_name());
-                $order->set_billing_last_name($customer->get_billing_last_name() ?: $customer->get_last_name());
-                $order->set_billing_email($customer->get_billing_email() ?: $customer->get_email());
-                $order->set_billing_phone($customer->get_billing_phone() ?: $customer->get_meta('billing_phone'));
-            }
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
+      }
+
+      $args = Xophz_Compass::get_input_json();
+      $items = isset($args->items) ? $args->items : [];
+
+      // Parse stringified JSON items array from FormData
+      if (is_string($items)) {
+          $decoded = json_decode($items);
+          if (json_last_error() !== JSON_ERROR_NONE) {
+              $raw_input = file_get_contents('php://input');
+              parse_str($raw_input, $raw_parsed);
+              $decoded = isset($raw_parsed['items']) ? json_decode(stripslashes($raw_parsed['items'])) : [];
+          }
+          $items = $decoded;
+      }
+
+      $discount = isset($args->discount) ? floatval($args->discount) : 0;
+      $customDiscounts = isset($args->customDiscounts) ? $args->customDiscounts : [];
+      $appliedCoupons = isset($args->appliedCoupons) ? $args->appliedCoupons : [];
+      $tipAmount = isset($args->tipAmount) ? floatval($args->tipAmount) : 0;
+      $paymentMethod = isset($args->paymentMethod) ? $args->paymentMethod : 'cash';
+      $splitPayments = isset($args->splitPayments) ? $args->splitPayments : [];
+
+      if (empty($items)) {
+          $this->send_json_response(['success' => false, 'message' => 'Cart is empty.']);
+          return;
+      }
+
+      $order = wc_create_order();
+      if (!$order || is_wp_error($order)) {
+          $msg = is_wp_error($order) ? $order->get_error_message() : 'Failed to create order.';
+          throw new \Exception($msg);
+      }
+      
+      $customerId = isset($args->customerId) ? intval($args->customerId) : 0;
+      $customerEmail = isset($args->customerEmail) ? sanitize_email($args->customerEmail) : '';
+      $customerPhone = isset($args->customerPhone) ? sanitize_text_field($args->customerPhone) : '';
+      $customerName = isset($args->customerName) ? sanitize_text_field($args->customerName) : '';
+      $createAccount = !empty($args->createAccount) && ( $args->createAccount === true || $args->createAccount === 'true' || $args->createAccount === 1 );
+      $marketingOptIn = !empty($args->marketingOptIn) && ( $args->marketingOptIn === true || $args->marketingOptIn === 'true' || $args->marketingOptIn === 1 );
+      $smsOptIn = !empty($args->smsOptIn) && ( $args->smsOptIn === true || $args->smsOptIn === 'true' || $args->smsOptIn === 1 );
+
+      if (!$customerId && !empty($customerEmail)) {
+          $existing_user = get_user_by('email', $customerEmail);
+          if ($existing_user) {
+              $customerId = $existing_user->ID;
+          } elseif ($createAccount && function_exists('wc_create_new_customer')) {
+              $username = wc_create_new_customer_username($customerEmail);
+              $password = wp_generate_password(12, true);
+              $new_id = wc_create_new_customer($customerEmail, $username, $password);
+              if (!is_wp_error($new_id)) {
+                  $customerId = $new_id;
+                  if (!empty($customerName)) {
+                      $parts = explode(' ', $customerName, 2);
+                      $fname = $parts[0];
+                      $lname = isset($parts[1]) ? $parts[1] : '';
+                      update_user_meta($customerId, 'first_name', $fname);
+                      update_user_meta($customerId, 'last_name', $lname);
+                      update_user_meta($customerId, 'billing_first_name', $fname);
+                      update_user_meta($customerId, 'billing_last_name', $lname);
+                  }
+                  if (!empty($customerPhone)) {
+                      update_user_meta($customerId, 'billing_phone', $customerPhone);
+                  }
+              }
+          }
+      }
+
+      if ($customerId) {
+          $order->set_customer_id($customerId);
+          $customer = new WC_Customer($customerId);
+          if ($customer) {
+              $order->set_billing_first_name($customer->get_billing_first_name() ?: ($customer->get_first_name() ?: $customerName));
+              $order->set_billing_last_name($customer->get_billing_last_name() ?: $customer->get_last_name());
+              $order->set_billing_email($customer->get_billing_email() ?: ($customer->get_email() ?: $customerEmail));
+              $order->set_billing_phone($customer->get_billing_phone() ?: ($customer->get_meta('billing_phone') ?: $customerPhone));
+          }
+      } else {
+          if (!empty($customerEmail)) {
+              $order->set_billing_email($customerEmail);
+          }
+          if (!empty($customerPhone)) {
+              $order->set_billing_phone($customerPhone);
+          }
+          if (!empty($customerName)) {
+              $parts = explode(' ', $customerName, 2);
+              $order->set_billing_first_name($parts[0]);
+              $order->set_billing_last_name(isset($parts[1]) ? $parts[1] : '');
+          }
+      }
+
+      if ($marketingOptIn) {
+          $order->update_meta_data('_pos_marketing_optin', 'yes');
+          $order->update_meta_data('_pos_marketing_optin_at', current_time('mysql'));
+          if ($customerId) {
+              update_user_meta($customerId, '_marketing_email_optin', 'yes');
+              update_user_meta($customerId, '_marketing_email_optin_at', current_time('mysql'));
+          }
+      }
+
+      if ($smsOptIn) {
+          $order->update_meta_data('_pos_sms_optin', 'yes');
+          $order->update_meta_data('_pos_sms_optin_at', current_time('mysql'));
+          if ($customerId) {
+              update_user_meta($customerId, '_marketing_sms_optin', 'yes');
+              update_user_meta($customerId, '_marketing_sms_optin_at', current_time('mysql'));
+          }
+      }
+
+      $cashier_id = isset($args->cashierId) ? intval($args->cashierId) : get_current_user_id();
+      if ($cashier_id) {
+          $order->update_meta_data('_pos_cashier_id', $cashier_id);
+          
+          // Track the WP post author to the cashier for global attribution and CRM
+          if ( get_post_type( $order->get_id() ) === 'shop_order' ) {
+              wp_update_post( [
+                  'ID'          => $order->get_id(),
+                  'post_author' => $cashier_id
+              ] );
+          }
+      }
+
+      foreach ($items as $item) {
+          $product_id = is_object($item) ? (isset($item->product_id) ? intval($item->product_id) : 0) : (isset($item['product_id']) ? intval($item['product_id']) : 0);
+          $quantity = is_object($item) ? (isset($item->quantity) ? intval($item->quantity) : 0) : (isset($item['quantity']) ? intval($item['quantity']) : 0);
+          if ($quantity <= 0) {
+              continue;
+          }
+          $product = wc_get_product($product_id);
+
+          if ($product && !is_wp_error($product)) {
+              $added = $order->add_product($product, $quantity);
+              if (is_wp_error($added)) {
+                  throw new \Exception($added->get_error_message());
+              }
+          }
+      }
+
+      if ($discount > 0) {
+          $item = new WC_Order_Item_Fee();
+          $item->set_name('POS Discount');
+          $item->set_amount(-$discount);
+          $item->set_total(-$discount);
+          $added = $order->add_item($item);
+          if (is_wp_error($added)) {
+              throw new \Exception($added->get_error_message());
+          }
+      }
+
+      if (is_array($appliedCoupons)) {
+          foreach ($appliedCoupons as $code) {
+              if (is_string($code)) {
+                  $applied = $order->apply_coupon(sanitize_text_field($code));
+                  if (is_wp_error($applied)) {
+                      throw new \Exception($applied->get_error_message());
+                  }
+              }
+          }
+      }
+
+      if (is_array($customDiscounts)) {
+          foreach ($customDiscounts as $cd) {
+              $amount = is_object($cd) ? (isset($cd->amount) ? floatval($cd->amount) : 0) : (isset($cd['amount']) ? floatval($cd['amount']) : 0);
+              $name = is_object($cd) ? (isset($cd->name) && !empty($cd->name) ? sanitize_text_field($cd->name) : 'Custom Discount') : (isset($cd['name']) && !empty($cd['name']) ? sanitize_text_field($cd['name']) : 'Custom Discount');
+              
+              if ($amount > 0) {
+                  $item = new WC_Order_Item_Fee();
+                  $item->set_name($name);
+                  $item->set_amount(-$amount);
+                  $item->set_total(-$amount);
+                  $added = $order->add_item($item);
+                  if (is_wp_error($added)) {
+                      throw new \Exception($added->get_error_message());
+                  }
+              }
+          }
+      }
+
+      if ($tipAmount > 0) {
+          $item = new WC_Order_Item_Fee();
+          $item->set_name('Tip');
+          $item->set_amount($tipAmount);
+          $item->set_total($tipAmount);
+          $added = $order->add_item($item);
+          if (is_wp_error($added)) {
+              throw new \Exception($added->get_error_message());
+          }
+          $order->update_meta_data('_pos_tip_amount', $tipAmount);
+          if (isset($cashier_id)) {
+              $order->update_meta_data('_pos_tip_cashier_id', $cashier_id);
+          }
+      }
+
+      // Set payment method and origin
+      $order->set_payment_method($paymentMethod);
+      
+      $method_title = ucfirst($paymentMethod);
+      if ($paymentMethod === 'bazaar_split') {
+          $method_title = 'Split Payment';
+      } else if ( function_exists( 'WC' ) ) {
+          $gateways_obj = WC()->payment_gateways();
+          if (!$gateways_obj) {
+              throw new \Exception('Payment gateways unavailable.');
+          }
+          $gateways = $gateways_obj->payment_gateways();
+          if ( isset( $gateways[$paymentMethod] ) ) {
+              $gw = $gateways[$paymentMethod];
+              $raw = $gw->title ?: $gw->get_method_title();
+              $method_title = $this->clean_payment_title($raw, $paymentMethod);
+          }
+      }
+
+      $order->set_payment_method_title($method_title);
+      $order->set_created_via('bazaar_pos');
+
+      if ($paymentMethod === 'bazaar_split' && !empty($splitPayments)) {
+          $order->update_meta_data('_pos_split_payments', json_encode($splitPayments));
+          $note = "Split Payment Breakdown:\n";
+          foreach ($splitPayments as $sp) {
+              $method = is_object($sp) ? (isset($sp->method) ? $sp->method : 'unknown') : (isset($sp['method']) ? $sp['method'] : 'unknown');
+              $amt = is_object($sp) ? (isset($sp->amount) ? floatval($sp->amount) : 0) : (isset($sp['amount']) ? floatval($sp['amount']) : 0);
+              $note .= "- " . ucfirst($method) . ": $" . number_format($amt, 2) . "\n";
+          }
+          $order->add_order_note($note);
+      }
+
+      // Calculate totals
+      $order->calculate_totals();
+
+      if ($paymentMethod === 'bazaar_split') {
+          $split_sum = 0.0;
+          if (is_array($splitPayments)) {
+              foreach ($splitPayments as $sp) {
+                  $amt = is_object($sp) ? (isset($sp->amount) ? floatval($sp->amount) : 0.0) : (isset($sp['amount']) ? floatval($sp['amount']) : 0.0);
+                  $split_sum += $amt;
+              }
+          }
+          if (abs($split_sum - $order->get_total()) >= 0.01) {
+              throw new \Exception('Split payment sum does not match order total.');
+          }
+      }
+
+      // Mimic WooCommerce behavior for manual payment gateways
+      if ( in_array( $paymentMethod, ['bacs', 'cheque'] ) ) {
+          $status_res = $order->update_status('on-hold', 'Order created via Bazaar POS.');
+      } elseif ( $paymentMethod === 'cod' ) {
+          $status_res = $order->update_status('processing', 'Order created via Bazaar POS.');
+      } else {
+          // For card/cash payments at POS, we assume immediate completion
+          $status_res = $order->update_status('completed', 'Order created via Bazaar POS.');
+      }
+      if (is_wp_error($status_res)) {
+          throw new \Exception($status_res->get_error_message());
+      }
+
+      $save_res = $order->save();
+      if (is_wp_error($save_res)) {
+          throw new \Exception($save_res->get_error_message());
+      }
+
+      if ($customerId) {
+          do_action('xophz_compass_record_action', 'bazaar_pos_purchase', $customerId, [
+              'order_id' => $order->get_id(),
+              'total' => $order->get_total(),
+              'payment_method' => $paymentMethod
+          ]);
+      }
+
+      $this->send_json_response([
+          'success' => true, 
+          'order_id' => $order->get_id(),
+          'order_key' => $order->get_order_key()
+      ]);
+    } catch (\Throwable $e) {
+        if ($order && is_a($order, 'WC_Order') && $order->get_id()) {
+            $order->delete(true);
         }
-
-        $cashier_id = isset($args->cashierId) ? intval($args->cashierId) : get_current_user_id();
-        if ($cashier_id) {
-            $order->update_meta_data('_pos_cashier_id', $cashier_id);
-            
-            // Track the WP post author to the cashier for global attribution and CRM
-            if ( get_post_type( $order->get_id() ) === 'shop_order' ) {
-                wp_update_post( [
-                    'ID'          => $order->get_id(),
-                    'post_author' => $cashier_id
-                ] );
-            }
-        }
-
-        foreach ($items as $item) {
-            $product_id = intval($item->product_id);
-            $quantity = intval($item->quantity);
-            $product = wc_get_product($product_id);
-
-            if ($product) {
-                $order->add_product($product, $quantity);
-            }
-        }
-
-        if ($discount > 0) {
-            $item = new WC_Order_Item_Fee();
-            $item->set_name('POS Discount');
-            $item->set_amount(-$discount);
-            $item->set_total(-$discount);
-            $order->add_item($item);
-        }
-
-        if (is_array($appliedCoupons)) {
-            foreach ($appliedCoupons as $code) {
-                if (is_string($code)) {
-                    $order->apply_coupon(sanitize_text_field($code));
-                }
-            }
-        }
-
-        if (is_array($customDiscounts)) {
-            foreach ($customDiscounts as $cd) {
-                $amount = isset($cd->amount) ? floatval($cd->amount) : 0;
-                $name = isset($cd->name) && !empty($cd->name) ? sanitize_text_field($cd->name) : 'Custom Discount';
-                
-                if ($amount > 0) {
-                    $item = new WC_Order_Item_Fee();
-                    $item->set_name($name);
-                    $item->set_amount(-$amount);
-                    $item->set_total(-$amount);
-                    $order->add_item($item);
-                }
-            }
-        }
-
-        if ($tipAmount > 0) {
-            $item = new WC_Order_Item_Fee();
-            $item->set_name('Tip');
-            $item->set_amount($tipAmount);
-            $item->set_total($tipAmount);
-            $order->add_item($item);
-            $order->update_meta_data('_pos_tip_amount', $tipAmount);
-            if (isset($cashier_id)) {
-                $order->update_meta_data('_pos_tip_cashier_id', $cashier_id);
-            }
-        }
-
-        // Set payment method and origin
-        $order->set_payment_method($paymentMethod);
-        
-        $method_title = ucfirst($paymentMethod);
-        if ($paymentMethod === 'bazaar_split') {
-            $method_title = 'Split Payment';
-        } else if ( function_exists( 'WC' ) ) {
-            $gateways = WC()->payment_gateways()->payment_gateways();
-            if ( isset( $gateways[$paymentMethod] ) ) {
-                $gw = $gateways[$paymentMethod];
-                $raw = $gw->title ?: $gw->get_method_title();
-                $method_title = $this->clean_payment_title($raw, $paymentMethod);
-            }
-        }
-
-        $order->set_payment_method_title($method_title);
-        $order->set_created_via('bazaar_pos');
-
-        if ($paymentMethod === 'bazaar_split' && !empty($splitPayments)) {
-            $order->update_meta_data('_pos_split_payments', json_encode($splitPayments));
-            $note = "Split Payment Breakdown:\n";
-            foreach ($splitPayments as $sp) {
-                $method = isset($sp->method) ? $sp->method : 'unknown';
-                $amt = isset($sp->amount) ? floatval($sp->amount) : 0;
-                $note .= "- " . ucfirst($method) . ": $" . number_format($amt, 2) . "\n";
-            }
-            $order->add_order_note($note);
-        }
-
-        // Calculate totals
-        $order->calculate_totals();
-
-        // Mimic WooCommerce behavior for manual payment gateways
-        if ( in_array( $paymentMethod, ['bacs', 'cheque'] ) ) {
-            $order->update_status('on-hold', 'Order created via Bazaar POS.');
-        } elseif ( $paymentMethod === 'cod' ) {
-            $order->update_status('processing', 'Order created via Bazaar POS.');
-        } else {
-            // For card/cash payments at POS, we assume immediate completion
-            $order->update_status('completed', 'Order created via Bazaar POS.');
-        }
-
-        if ($customerId) {
-            do_action('xophz_compass_record_action', 'bazaar_pos_purchase', $customerId, [
-                'order_id' => $order->get_id(),
-                'total' => $order->get_total(),
-                'payment_method' => $paymentMethod
-            ]);
-        }
-
-        Xophz_Compass::output_json([
-            'success' => true, 
-            'order_id' => $order->get_id(),
-            'order_key' => $order->get_order_key()
-        ]);
-    } catch (Exception $e) {
-        Xophz_Compass::output_json([
+        $this->send_json_response([
             'success' => false, 
             'message' => $e->getMessage()
         ]);
@@ -464,12 +634,24 @@ class Xophz_Compass_Bazaar_Admin_Orders {
   }
 
   public function getPaymentGateways() {
+    try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
+      }
+
       if ( ! function_exists( 'WC' ) ) {
-          Xophz_Compass::output_json(['gateways' => []]);
+          $this->send_json_response(['success' => true, 'gateways' => []]);
           return;
       }
       
-      $gateways = WC()->payment_gateways()->get_available_payment_gateways();
+      $gateways_obj = WC()->payment_gateways();
+      if (!$gateways_obj) {
+          throw new \Exception('Payment gateways unavailable.');
+      }
+      $gateways = $gateways_obj->get_available_payment_gateways();
+      if (is_wp_error($gateways)) {
+          throw new \Exception($gateways->get_error_message());
+      }
       $data = [];
       
       foreach($gateways as $gateway) {
@@ -481,16 +663,31 @@ class Xophz_Compass_Bazaar_Admin_Orders {
           ];
       }
       
-      Xophz_Compass::output_json(['gateways' => array_values($data)]);
+      $this->send_json_response(['success' => true, 'gateways' => array_values($data)]);
+    } catch (\Throwable $e) {
+      $this->send_json_response(['success' => false, 'message' => $e->getMessage(), 'gateways' => []]);
+    }
   }
 
   public function getAllPaymentGateways() {
+    try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
+      }
+
       if ( ! function_exists( 'WC' ) ) {
-          Xophz_Compass::output_json(['success' => false, 'gateways' => []]);
+          $this->send_json_response(['success' => false, 'gateways' => []]);
           return;
       }
       
-      $gateways = WC()->payment_gateways()->payment_gateways();
+      $gateways_obj = WC()->payment_gateways();
+      if (!$gateways_obj) {
+          throw new \Exception('Payment gateways unavailable.');
+      }
+      $gateways = $gateways_obj->payment_gateways();
+      if (is_wp_error($gateways)) {
+          throw new \Exception($gateways->get_error_message());
+      }
       $data = [];
       
       foreach($gateways as $gateway) {
@@ -517,12 +714,20 @@ class Xophz_Compass_Bazaar_Admin_Orders {
           ];
       }
       
-      Xophz_Compass::output_json(['success' => true, 'gateways' => array_values($data)]);
+      $this->send_json_response(['success' => true, 'gateways' => array_values($data)]);
+    } catch (\Throwable $e) {
+      $this->send_json_response(['success' => false, 'message' => $e->getMessage(), 'gateways' => []]);
+    }
   }
 
   public function togglePaymentGateway() {
+    try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
+      }
+
       if ( ! function_exists( 'WC' ) ) {
-          Xophz_Compass::output_json(['success' => false, 'message' => 'WooCommerce is not active.']);
+          $this->send_json_response(['success' => false, 'message' => 'WooCommerce is not active.']);
           return;
       }
 
@@ -531,13 +736,17 @@ class Xophz_Compass_Bazaar_Admin_Orders {
       $enabled = isset($args->enabled) ? (bool)$args->enabled : false;
 
       if (!$gateway_id) {
-          Xophz_Compass::output_json(['success' => false, 'message' => 'Gateway ID is required.']);
+          $this->send_json_response(['success' => false, 'message' => 'Gateway ID is required.']);
           return;
       }
 
-      $gateways = WC()->payment_gateways()->payment_gateways();
+      $gateways_obj = WC()->payment_gateways();
+      if (!$gateways_obj) {
+          throw new \Exception('Payment gateways unavailable.');
+      }
+      $gateways = $gateways_obj->payment_gateways();
       if (!isset($gateways[$gateway_id])) {
-          Xophz_Compass::output_json(['success' => false, 'message' => 'Payment gateway not found.']);
+          $this->send_json_response(['success' => false, 'message' => 'Payment gateway not found.']);
           return;
       }
 
@@ -545,42 +754,51 @@ class Xophz_Compass_Bazaar_Admin_Orders {
       $gateway->update_option('enabled', $enabled ? 'yes' : 'no');
 
       // Re-initialize payment gateways
-      WC()->payment_gateways()->init();
+      $gateways_obj->init();
 
-      Xophz_Compass::output_json([
+      $this->send_json_response([
           'success' => true,
           'gateway_id' => $gateway_id,
           'enabled' => $enabled
       ]);
+    } catch (\Throwable $e) {
+      $this->send_json_response(['success' => false, 'message' => $e->getMessage()]);
+    }
   }
 
   public function updateOrderStatus() {
+    try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
+      }
       $args = Xophz_Compass::get_input_json();
       $order_id = isset($args->order_id) ? intval($args->order_id) : 0;
       $status = isset($args->status) ? sanitize_text_field($args->status) : '';
 
       if (!$order_id || !$status) {
-          Xophz_Compass::output_json(['success' => false, 'message' => 'Invalid order ID or status']);
+          $this->send_json_response(['success' => false, 'message' => 'Invalid order ID or status']);
           return;
       }
 
       $order = wc_get_order($order_id);
-      if (!$order) {
-          Xophz_Compass::output_json(['success' => false, 'message' => 'Order not found']);
+      if (!$order || is_wp_error($order)) {
+          $this->send_json_response(['success' => false, 'message' => 'Order not found']);
           return;
       }
 
-      try {
-          $order->update_status($status, 'Order status updated via COMPASS Bazaar UI.');
-          
-          Xophz_Compass::output_json([
-              'success' => true,
-              'order_id' => $order_id,
-              'new_status' => $order->get_status()
-          ]);
-      } catch (Exception $e) {
-          Xophz_Compass::output_json(['success' => false, 'message' => $e->getMessage()]);
+      $res = $order->update_status($status, 'Order status updated via COMPASS Bazaar UI.');
+      if (is_wp_error($res)) {
+          throw new \Exception($res->get_error_message());
       }
+      
+      $this->send_json_response([
+          'success' => true,
+          'order_id' => $order_id,
+          'new_status' => $order->get_status()
+      ]);
+    } catch (\Throwable $e) {
+        $this->send_json_response(['success' => false, 'message' => $e->getMessage()]);
+    }
   }
 
   /**
@@ -590,38 +808,55 @@ class Xophz_Compass_Bazaar_Admin_Orders {
     */
   public function getCategories()
   {
-    global $wp_query;
+    try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
+      }
 
-    $args['orderby']  = 'meta_value_num';
-    $args['meta_key'] = 'order'; // phpcs:ignore
+      global $wp_query;
 
-    $args = 
-      array(
-        'meta_key' => 'order',
-        'orderby' => 'meta_value_num',
-        'pad_counts'         => 1,
-        'show_count'         => 1,
-        'hierarchical'       => 1,
-        'hide_empty'         => 0,
-        'taxonomy'           => 'product_cat',
-    );
-
-    if ( 'order' === $args['orderby'] ) {
       $args['orderby']  = 'meta_value_num';
       $args['meta_key'] = 'order'; // phpcs:ignore
+
+      $args = 
+        array(
+          'meta_key' => 'order',
+          'orderby' => 'meta_value_num',
+          'pad_counts'         => 1,
+          'show_count'         => 1,
+          'hierarchical'       => 1,
+          'hide_empty'         => 0,
+          'taxonomy'           => 'product_cat',
+      );
+
+      if ( 'order' === $args['orderby'] ) {
+        $args['orderby']  = 'meta_value_num';
+        $args['meta_key'] = 'order'; // phpcs:ignore
+      }
+
+      $categories = get_terms($args['taxonomy'],$args);
+      if (is_wp_error($categories)) {
+          throw new \Exception($categories->get_error_message());
+      }
+      $walker = new Walker_Simple_String($args);
+
+      $walker->walk($categories,0);
+
+      $this->send_json_response([
+        'success' => true,
+        'categories' => $walker->categories 
+      ]);
+    } catch (\Throwable $e) {
+      $this->send_json_response(['success' => false, 'message' => $e->getMessage(), 'categories' => []]);
     }
-
-    $categories = get_terms($args['taxonomy'],$args);
-    $walker = new Walker_Simple_String($args);
-
-    $walker->walk($categories,0);
-
-    Xophz_Compass::output_json([
-      'categories' => $walker->categories 
-    ]);
   }
 
   public function getPosCustomers() {
+    try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
+      }
+
       $args = Xophz_Compass::get_input_json();
       $search = isset($args->search) ? sanitize_text_field($args->search) : '';
 
@@ -664,127 +899,168 @@ class Xophz_Compass_Bazaar_Admin_Orders {
           ];
       }
 
-      Xophz_Compass::output_json([
+      $this->send_json_response([
         'success' => true,
         'customers' => $data
       ]);
+    } catch (\Throwable $e) {
+      $this->send_json_response(['success' => false, 'message' => $e->getMessage(), 'customers' => []]);
+    }
   }
 
   public function getPosOrderForRefund() {
-    $args = Xophz_Compass::get_input_json();
-    $order_id = isset($args->order_id) ? intval($args->order_id) : 0;
+    try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
+      }
 
-    if (!$order_id) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Order ID is required.']);
-        return;
+      $args = Xophz_Compass::get_input_json();
+      $order_id = isset($args->order_id) ? intval($args->order_id) : 0;
+
+      if (!$order_id) {
+          $this->send_json_response(['success' => false, 'message' => 'Order ID is required.']);
+          return;
+      }
+
+      $order = wc_get_order($order_id);
+      if (!$order || is_wp_error($order)) {
+          $this->send_json_response(['success' => false, 'message' => 'Order not found.']);
+          return;
+      }
+
+      $items_data = [];
+      foreach ($order->get_items() as $item_id => $item) {
+          $product = $item->get_product();
+          $refunded_qty = absint($order->get_qty_refunded_for_item($item_id));
+          $item_qty = $item->get_quantity();
+          $qty_available = $item_qty - $refunded_qty;
+          
+          if ($qty_available > 0) {
+              $items_data[] = [
+                  'item_id' => $item_id,
+                  'product_id' => $item->get_product_id(),
+                  'name' => $item->get_name(),
+                  'qty_available' => $qty_available,
+                  'price' => $order->get_item_total($item, false, false),
+                  'total' => $order->get_line_total($item, false, false),
+                  'tax' => $order->get_line_tax($item),
+                  'thumb' => ($product && !is_wp_error($product)) ? wp_get_attachment_image_url($product->get_image_id(), 'thumbnail') : ''
+              ];
+          }
+      }
+
+      $this->send_json_response([
+          'success' => true,
+          'order' => [
+              'id' => $order->get_id(),
+              'status' => $order->get_status(),
+              'total' => $order->get_total(),
+              'total_refunded' => $order->get_total_refunded(),
+              'items' => $items_data
+          ]
+      ]);
+    } catch (\Throwable $e) {
+      $this->send_json_response(['success' => false, 'message' => $e->getMessage()]);
     }
-
-    $order = wc_get_order($order_id);
-    if (!$order) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Order not found.']);
-        return;
-    }
-
-    $items_data = [];
-    foreach ($order->get_items() as $item_id => $item) {
-        $product = $item->get_product();
-        $refunded_qty = $order->get_qty_refunded_for_item($item_id);
-        $qty_available = $item->get_quantity() + $refunded_qty; // refunded is negative
-        
-        if ($qty_available > 0) {
-            $items_data[] = [
-                'item_id' => $item_id,
-                'product_id' => $item->get_product_id(),
-                'name' => $item->get_name(),
-                'qty_available' => $qty_available,
-                'price' => $order->get_item_total($item, false, false),
-                'total' => $order->get_line_total($item, false, false),
-                'tax' => $order->get_line_tax($item),
-                'thumb' => $product ? wp_get_attachment_image_url($product->get_image_id(), 'thumbnail') : ''
-            ];
-        }
-    }
-
-    Xophz_Compass::output_json([
-        'success' => true,
-        'order' => [
-            'id' => $order->get_id(),
-            'status' => $order->get_status(),
-            'total' => $order->get_total(),
-            'total_refunded' => $order->get_total_refunded(),
-            'items' => $items_data
-        ]
-    ]);
   }
 
   public function processPosRefund() {
-    $args = Xophz_Compass::get_input_json();
-    $order_id = isset($args->order_id) ? intval($args->order_id) : 0;
-    $refund_items = isset($args->items) ? $args->items : [];
-    $reason = isset($args->reason) ? sanitize_text_field($args->reason) : 'POS Return';
-
-    if (!$order_id || empty($refund_items)) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Invalid refund parameters.']);
-        return;
-    }
-
-    $order = wc_get_order($order_id);
-    if (!$order) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Order not found.']);
-        return;
-    }
-
-    $line_items = [];
-    $refund_amount = 0;
-
-    foreach ($refund_items as $r_item) {
-        $item_id = intval($r_item->item_id);
-        $qty = intval($r_item->qty);
-        
-        $order_item = $order->get_item($item_id);
-        if (!$order_item) continue;
-
-        $unit_total = $order->get_item_total($order_item, false, false);
-        $unit_tax = $order->get_line_tax($order_item) / $order_item->get_quantity();
-
-        $line_total = $unit_total * $qty;
-        $line_tax = $unit_tax * $qty;
-
-        $refund_amount += ($line_total + $line_tax);
-
-        $line_items[$item_id] = [
-            'qty' => $qty,
-            'refund_total' => $line_total,
-            'refund_tax' => [$order_item->get_taxes()['total'] ? key($order_item->get_taxes()['total']) : 0 => $line_tax]
-        ];
-    }
-
     try {
-        $refund = wc_create_refund([
-            'amount'         => $refund_amount,
-            'reason'         => $reason,
-            'order_id'       => $order_id,
-            'line_items'     => $line_items,
-            'refund_payment' => false, // Do not auto-refund gateway for POS, handle manually if needed
-            'restock_items'  => true
-        ]);
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
+      }
 
-        if (is_wp_error($refund)) {
-            throw new Exception($refund->get_error_message());
-        }
+      $args = Xophz_Compass::get_input_json();
+      $order_id = isset($args->order_id) ? intval($args->order_id) : 0;
+      $refund_items = isset($args->items) ? $args->items : [];
+      $reason = isset($args->reason) ? sanitize_text_field($args->reason) : 'POS Return';
 
-        Xophz_Compass::output_json([
-            'success' => true,
-            'message' => 'Refund processed successfully.',
-            'refund_id' => $refund->get_id(),
-            'amount' => $refund_amount
-        ]);
+      if (!$order_id || empty($refund_items)) {
+          $this->send_json_response(['success' => false, 'message' => 'Invalid refund parameters.']);
+          return;
+      }
 
-    } catch (Exception $e) {
-        Xophz_Compass::output_json([
-            'success' => false,
-            'message' => $e->getMessage()
-        ]);
+      $order = wc_get_order($order_id);
+      if (!$order || is_wp_error($order)) {
+          $this->send_json_response(['success' => false, 'message' => 'Order not found.']);
+          return;
+      }
+
+      $line_items = [];
+      $refund_amount = 0;
+
+      foreach ($refund_items as $r_item) {
+          $item_id = is_object($r_item) ? (isset($r_item->item_id) ? intval($r_item->item_id) : 0) : (isset($r_item['item_id']) ? intval($r_item['item_id']) : 0);
+          $qty = is_object($r_item) ? (isset($r_item->qty) ? intval($r_item->qty) : 0) : (isset($r_item['qty']) ? intval($r_item['qty']) : 0);
+          if ($qty <= 0) {
+              continue;
+          }
+          
+          $order_item = $order->get_item($item_id);
+          if (!$order_item || is_wp_error($order_item)) {
+              continue;
+          }
+
+          $item_qty = $order_item->get_quantity();
+          $refunded_qty = absint($order->get_qty_refunded_for_item($item_id));
+          $available_qty = $item_qty - $refunded_qty;
+          if ($available_qty <= 0) {
+              continue;
+          }
+
+          if ($qty > $available_qty) {
+              $qty = $available_qty;
+          }
+
+          $unit_total = $order->get_item_total($order_item, false, false);
+          $unit_tax = $item_qty > 0 ? ($order->get_line_tax($order_item) / $item_qty) : 0;
+
+          $line_total = $unit_total * $qty;
+          $line_tax = $unit_tax * $qty;
+
+          $refund_amount += ($line_total + $line_tax);
+
+          $item_taxes = $order_item->get_taxes();
+          $refund_tax = [];
+          if ($line_tax > 0 && !empty($item_taxes['total'])) {
+              $tax_rate_id = key($item_taxes['total']);
+              if ($tax_rate_id) {
+                  $refund_tax[$tax_rate_id] = $line_tax;
+              }
+          }
+
+          $line_items[$item_id] = [
+              'qty' => $qty,
+              'refund_total' => $line_total,
+              'refund_tax' => $refund_tax
+          ];
+      }
+
+      $refund = wc_create_refund([
+          'amount'         => $refund_amount,
+          'reason'         => $reason,
+          'order_id'       => $order_id,
+          'line_items'     => $line_items,
+          'refund_payment' => false, // Do not auto-refund gateway for POS, handle manually if needed
+          'restock_items'  => true
+      ]);
+
+      if (is_wp_error($refund)) {
+          throw new \Exception($refund->get_error_message());
+      }
+
+      $this->send_json_response([
+          'success' => true,
+          'message' => 'Refund processed successfully.',
+          'refund_id' => $refund->get_id(),
+          'amount' => $refund_amount
+      ]);
+
+    } catch (\Throwable $e) {
+      $this->send_json_response([
+          'success' => false,
+          'message' => $e->getMessage()
+      ]);
     }
   }
 
@@ -815,8 +1091,12 @@ class Xophz_Compass_Bazaar_Admin_Orders {
 
   public function getCoupons() {
     try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
+      }
+
       if (!class_exists('WooCommerce')) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'WooCommerce is not active.', 'coupons' => []]);
+        $this->send_json_response(['success' => false, 'message' => 'WooCommerce is not active.', 'coupons' => []]);
         return;
       }
 
@@ -866,19 +1146,23 @@ class Xophz_Compass_Bazaar_Admin_Orders {
         }
       }
 
-      Xophz_Compass::output_json([
+      $this->send_json_response([
         'success' => true,
         'coupons' => $coupons
       ]);
     } catch (\Throwable $e) {
-      Xophz_Compass::output_json(['success' => false, 'message' => $e->getMessage(), 'coupons' => []]);
+      $this->send_json_response(['success' => false, 'message' => $e->getMessage(), 'coupons' => []]);
     }
   }
 
   public function saveCoupon() {
     try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
+      }
+
       if (!class_exists('WooCommerce')) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'WooCommerce is not active.']);
+        $this->send_json_response(['success' => false, 'message' => 'WooCommerce is not active.']);
         return;
       }
 
@@ -887,7 +1171,7 @@ class Xophz_Compass_Bazaar_Admin_Orders {
       $code = isset($args->code) ? sanitize_text_field($args->code) : '';
 
       if (empty($code)) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Coupon code is required.']);
+        $this->send_json_response(['success' => false, 'message' => 'Coupon code is required.']);
         return;
       }
 
@@ -932,20 +1216,24 @@ class Xophz_Compass_Bazaar_Admin_Orders {
 
       $saved_id = $coupon->save();
 
+      if (is_wp_error($saved_id)) {
+        throw new \Exception($saved_id->get_error_message());
+      }
+
       if ($saved_id) {
-        Xophz_Compass::output_json([
+        $this->send_json_response([
           'success' => true,
           'id'      => $saved_id,
           'message' => 'Coupon saved successfully.'
         ]);
       } else {
-        Xophz_Compass::output_json([
+        $this->send_json_response([
           'success' => false,
           'message' => 'Failed to save coupon.'
         ]);
       }
     } catch (\Throwable $e) {
-      Xophz_Compass::output_json([
+      $this->send_json_response([
         'success' => false,
         'message' => $e->getMessage()
       ]);
@@ -954,8 +1242,12 @@ class Xophz_Compass_Bazaar_Admin_Orders {
 
   public function deleteCoupon() {
     try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
+          throw new \Exception('Permission denied.');
+      }
+
       if (!class_exists('WooCommerce')) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'WooCommerce is not active.']);
+        $this->send_json_response(['success' => false, 'message' => 'WooCommerce is not active.']);
         return;
       }
 
@@ -963,24 +1255,24 @@ class Xophz_Compass_Bazaar_Admin_Orders {
       $id   = isset($args->id) ? intval($args->id) : 0;
 
       if (!$id) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Coupon ID is required.']);
+        $this->send_json_response(['success' => false, 'message' => 'Coupon ID is required.']);
         return;
       }
 
       $coupon = new WC_Coupon($id);
       if (!$coupon->get_id()) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Coupon not found.']);
+        $this->send_json_response(['success' => false, 'message' => 'Coupon not found.']);
         return;
       }
 
       $coupon->delete(true);
 
-      Xophz_Compass::output_json([
+      $this->send_json_response([
         'success' => true,
         'message' => 'Coupon deleted successfully.'
       ]);
     } catch (\Throwable $e) {
-      Xophz_Compass::output_json([
+      $this->send_json_response([
         'success' => false,
         'message' => $e->getMessage()
       ]);
@@ -1060,5 +1352,3 @@ class Walker_Simple_String extends Walker {
     parent::display_element( $element, $children_elements, $max_depth, $depth, $args, $output );
 	}
 }
-
-

@@ -148,7 +148,8 @@ class Xophz_Compass_Bazaar_Admin {
     }
 
     try {
-      $product = isset($args->id) && $args->id ? wc_get_product($args->id) : new WC_Product_Simple();
+      $product_id = (!empty($args->id) && is_numeric($args->id) && intval($args->id) > 0) ? intval($args->id) : 0;
+      $product    = $product_id > 0 ? wc_get_product($product_id) : new WC_Product_Simple();
       
       if (!$product) {
         Xophz_Compass::output_json(['success' => false, 'message' => 'Product not found']);
@@ -191,8 +192,11 @@ class Xophz_Compass_Bazaar_Admin {
         $product->set_stock_status(sanitize_text_field($args->stock_status));
       }
       
-      if (isset($args->category_ids) && is_array($args->category_ids)) {
-        $product->set_category_ids(array_map('intval', array_filter($args->category_ids)));
+      if (isset($args->category_ids)) {
+        $cat_ids = is_string($args->category_ids) ? json_decode($args->category_ids, true) : $args->category_ids;
+        if (is_array($cat_ids)) {
+          $product->set_category_ids(array_map('intval', array_filter($cat_ids)));
+        }
       }
 
       // Handle Image Assignment (from Media Library) or Upload (from base64)
@@ -225,7 +229,7 @@ class Xophz_Compass_Bazaar_Admin {
         }
       }
 
-      if (!isset($args->id) || !$args->id) {
+      if (!$product_id) {
         $product->set_status('publish');
       }
       
