@@ -104,6 +104,8 @@ class Xophz_Compass_Bazaar_Admin_Orders {
         }
         $data = $order->get_data();
         $data['order'] = $order->get_order_number();
+        $data['currency_symbol'] = get_woocommerce_currency_symbol($order->get_currency());
+        
         if (isset($data['date_created']) && is_a($data['date_created'], 'WC_DateTime')) {
             $data['date_created'] = $data['date_created']->date('Y-m-d H:i:s');
         }
@@ -115,6 +117,39 @@ class Xophz_Compass_Bazaar_Admin_Orders {
                 $data['cashier_name'] = $cashier->display_name;
             }
         }
+        if (empty($data['cashier_name'])) {
+            $data['cashier_name'] = 'System / Online Store';
+        }
+
+        $formatted_items = [];
+        foreach ($order->get_items() as $item_id => $item) {
+            $product = $item->get_product();
+            $thumb = '';
+            $sku = '';
+            if ($product) {
+                $sku = $product->get_sku();
+                $image_id = $product->get_image_id();
+                if ($image_id) {
+                    $thumb_src = wp_get_attachment_image_src($image_id, 'thumbnail');
+                    if ($thumb_src) {
+                        $thumb = $thumb_src[0];
+                    }
+                }
+            }
+
+            $formatted_items[] = [
+                'id' => $item_id,
+                'name' => $item->get_name(),
+                'product_id' => $item->get_product_id(),
+                'variation_id' => $item->get_variation_id(),
+                'quantity' => $item->get_quantity(),
+                'subtotal' => floatval($item->get_subtotal()),
+                'total' => floatval($item->get_total()),
+                'sku' => $sku,
+                'thumb' => $thumb
+            ];
+        }
+        $data['line_items'] = $formatted_items;
         
         return $data;
       };

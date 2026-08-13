@@ -193,6 +193,8 @@ class Xophz_Compass_Bazaar {
     $this->loader->add_action( 'wp_ajax_save_product', $plugin_admin, 'saveProduct');
 
     $this->loader->add_action( 'wp_ajax_bazaar_import_products_csv', $plugin_admin, 'importProductsCsv');
+
+    $this->loader->add_action( 'wp_ajax_bazaar_lookup_barcode', $plugin_admin, 'lookupBarcode');
   }
 
   private function define_compass_hooks(){

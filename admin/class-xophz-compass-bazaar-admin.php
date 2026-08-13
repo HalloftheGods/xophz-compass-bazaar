@@ -390,6 +390,95 @@ class Xophz_Compass_Bazaar_Admin {
     }
   }
 
+  public function lookupBarcode() {
+    try {
+      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_products')) {
+        Xophz_Compass::output_json(['success' => false, 'message' => 'Permission denied.']);
+        return;
+      }
+
+      $args = Xophz_Compass::get_input_json();
+      $barcode = isset($args->barcode) ? trim(sanitize_text_field($args->barcode)) : '';
+
+      if (empty($barcode)) {
+        Xophz_Compass::output_json(['success' => false, 'message' => 'Barcode string is required.']);
+        return;
+      }
+
+      $title = '';
+      $brand = '';
+      $description = '';
+      $category = '';
+      $image_url = '';
+
+      // 1. Primary Query: Open Food Facts & Open Products Facts API
+      $url = 'https://world.openfoodfacts.org/api/v2/product/' . urlencode($barcode) . '.json';
+      $response = wp_remote_get($url, ['timeout' => 8, 'headers' => ['User-Agent' => 'CompassBazaar/1.0']]);
+
+      if (!is_wp_error($response) && wp_remote_retrieve_response_code($response) === 200) {
+        $body = wp_remote_retrieve_body($response);
+        $data = json_decode($body, true);
+
+        if (isset($data['status']) && $data['status'] === 1 && isset($data['product'])) {
+          $p = $data['product'];
+          $title = isset($p['product_name']) ? $p['product_name'] : '';
+          $brand = isset($p['brands']) ? $p['brands'] : '';
+          $category = isset($p['categories']) ? $p['categories'] : (isset($p['categories_old']) ? $p['categories_old'] : '');
+          $image_url = isset($p['image_url']) ? $p['image_url'] : (isset($p['image_front_url']) ? $p['image_front_url'] : '');
+          $description = isset($p['generic_name']) ? $p['generic_name'] : '';
+          
+          if (!empty($brand) && !empty($title) && stripos($title, $brand) === false) {
+            $title = $brand . ' ' . $title;
+          }
+        }
+      }
+
+      // 2. Secondary Query Fallback: UPCitemdb Trial API
+      if (empty($title)) {
+        $upc_url = 'https://api.upcitemdb.com/prod/trial/lookup?upc=' . urlencode($barcode);
+        $upc_response = wp_remote_get($upc_url, ['timeout' => 8]);
+
+        if (!is_wp_error($upc_response) && wp_remote_retrieve_response_code($upc_response) === 200) {
+          $upc_body = wp_remote_retrieve_body($upc_response);
+          $upc_data = json_decode($upc_body, true);
+
+          if (isset($upc_data['items']) && is_array($upc_data['items']) && count($upc_data['items']) > 0) {
+            $item = $upc_data['items'][0];
+            $title = isset($item['title']) ? $item['title'] : '';
+            $brand = isset($item['brand']) ? $item['brand'] : '';
+            $description = isset($item['description']) ? $item['description'] : '';
+            $category = isset($item['category']) ? $item['category'] : '';
+            if (isset($item['images']) && is_array($item['images']) && count($item['images']) > 0) {
+              $image_url = $item['images'][0];
+            }
+          }
+        }
+      }
+
+      if (empty($title)) {
+        Xophz_Compass::output_json([
+          'success' => false,
+          'message' => "No product record found in global database for barcode {$barcode}."
+        ]);
+        return;
+      }
+
+      Xophz_Compass::output_json([
+        'success' => true,
+        'product' => [
+          'title' => $title,
+          'brand' => $brand,
+          'description' => $description,
+          'category' => $category,
+          'image_url' => $image_url,
+          'barcode' => $barcode
+        ]
+      ]);
+    } catch (\Throwable $e) {
+      Xophz_Compass::output_json(['success' => false, 'message' => $e->getMessage()]);
+    }
+  }
+
 
   public function updateProductStock(){
     $args = Xophz_Compass::get_input_json();
