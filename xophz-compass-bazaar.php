@@ -8,7 +8,7 @@
  * registers the activation and deactivation functions, and defines a function
  * that starts the plugin.
  *
- * @link              http://example.com
+ * @link              https://youmeos.com
  * @since             1.0.0
  * @package           Xophz_Compass_Bazaar
  *
@@ -20,7 +20,7 @@
  * Description:       Manage inventory stock levels, order fulfillment, point of sale transactions, and financial revenue analytics in real time.
  * Version:           26.9.2
  * Author:            Hall of the Gods, Inc.
- * Author URI:        http://example.com/
+ * Author URI:        https://youmeos.com/
  * License:           GPL-2.0+
  * License URI:       http://www.gnu.org/licenses/gpl-2.0.txt
  * Text Domain:       xophz-compass-bazaar
@@ -54,8 +54,7 @@ function activate_xophz_compass_bazaar() {
  * This action is documented in includes/class-xophz-compass-bazaar-deactivator.php
  */
 function deactivate_xophz_compass_bazaar() {
-  require_once plugin_dir_path( __FILE__ ) . 'includes/class-xophz-compass-bazaar-deactivator.php';
-  Xophz_Compass_Bazaar_Deactivator::deactivate();
+	Xophz_Compass_Bazaar::deactivate();
 }
 
 register_activation_hook( __FILE__, 'activate_xophz_compass_bazaar' );
