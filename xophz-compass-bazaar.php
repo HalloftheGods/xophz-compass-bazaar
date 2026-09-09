@@ -46,7 +46,10 @@ define( 'XOPHZ_COMPASS_BAZAAR_VERSION', '26.9.4' );
  */
 function activate_xophz_compass_bazaar() {
   require_once plugin_dir_path( __FILE__ ) . 'includes/class-xophz-compass-bazaar-activator.php';
+  require_once plugin_dir_path( __FILE__ ) . 'includes/class-xophz-bazaar-buy-router.php';
   Xophz_Compass_Bazaar_Activator::activate();
+  Xophz_Bazaar_Buy_Router::register_rewrite_rules();
+  flush_rewrite_rules();
 }
 
 /**
@@ -55,6 +58,7 @@ function activate_xophz_compass_bazaar() {
  */
 function deactivate_xophz_compass_bazaar() {
 	Xophz_Compass_Bazaar::deactivate();
+	flush_rewrite_rules();
 }
 
 register_activation_hook( __FILE__, 'activate_xophz_compass_bazaar' );
@@ -65,6 +69,13 @@ add_action( 'before_woocommerce_init', function() {
     \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );
   }
 } );
+
+/**
+ * Checkout & Commerce Service Infrastructure
+ */
+require_once plugin_dir_path( __FILE__ ) . 'includes/class-xophz-bazaar-checkout-service.php';
+require_once plugin_dir_path( __FILE__ ) . 'includes/class-xophz-bazaar-buy-router.php';
+Xophz_Bazaar_Buy_Router::init();
 
 /**
  * The core plugin class that is used to define internationalization,
