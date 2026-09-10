@@ -19,9 +19,10 @@ class Xophz_Bazaar_Checkout_Service {
 	/**
 	 * Retrieve the active Stripe Secret Key across WordPress options, constants, and environment.
 	 *
+	 * @param bool $force_test Whether to force selection of the Stripe Test Key.
 	 * @return string
 	 */
-	public static function get_stripe_secret_key(): string {
+	public static function get_stripe_secret_key( bool $force_test = false ): string {
 		$is_local = false;
 		if ( defined( 'WP_ENVIRONMENT_TYPE' ) && in_array( WP_ENVIRONMENT_TYPE, array( 'local', 'development' ), true ) ) {
 			$is_local = true;
@@ -46,8 +47,8 @@ class Xophz_Bazaar_Checkout_Service {
 			}
 		}
 
-		// When developing locally, prioritize the Stripe Test Key
-		if ( $is_local && ! empty( $resolved_test_key ) ) {
+		// When developing locally or when test mode is forced, prioritize the Stripe Test Key
+		if ( ( $force_test || $is_local ) && ! empty( $resolved_test_key ) ) {
 			return $resolved_test_key;
 		}
 
@@ -130,10 +131,20 @@ class Xophz_Bazaar_Checkout_Service {
 	 * @return array|WP_Error
 	 */
 	public static function process_buy_request( array $segments, array $query = array(), string $method = 'GET' ) {
+		// Detect sandbox / test checkout request
+		$test_requested  = ! empty( $query['test'] ) || ! empty( $query['test_mode'] ) || ! empty( $query['sandbox'] );
+		$wizard_key      = get_option( 'compass_wizard_key', '' );
+		$has_valid_dev   = ! empty( $wizard_key ) && ! empty( $query['dev_key'] ) && hash_equals( $wizard_key, (string) $query['dev_key'] );
+		$from_local      = ( ! empty( $query['return_origin'] ) && ( strpos( $query['return_origin'], 'localhost' ) !== false || strpos( $query['return_origin'], '127.0.0.1' ) !== false ) )
+			|| ( ! empty( $query['return_url'] ) && ( strpos( $query['return_url'], 'localhost' ) !== false || strpos( $query['return_url'], '127.0.0.1' ) !== false ) );
+		$force_test_mode = $test_requested || $has_valid_dev || $from_local;
+
 		// 1. Give external plugins first right of refusal via dynamic resolution hook
 		$dynamic_resolved = apply_filters( 'xophz_resolve_buy_request', null, $segments, $query );
 
 		if ( is_array( $dynamic_resolved ) && ! empty( $dynamic_resolved['handled'] ) ) {
+			$dynamic_resolved['force_test'] = $dynamic_resolved['force_test'] ?? $force_test_mode;
+
 			// Attach verified success and cancel URLs if not provided
 			if ( empty( $dynamic_resolved['success_url'] ) || empty( $dynamic_resolved['cancel_url'] ) ) {
 				$return_url = ! empty( $query['return_url'] ) ? esc_url_raw( $query['return_url'] ) : '';
@@ -231,13 +242,6 @@ class Xophz_Bazaar_Checkout_Service {
 					: home_url( "/callback/stripe?status=cancel&tier={$tier_id}" )
 				);
 		}
-
-		// Detect sandbox / test checkout request
-		$test_requested  = ! empty( $query['test'] ) || ! empty( $query['test_mode'] ) || ! empty( $query['sandbox'] );
-		$wizard_key      = get_option( 'compass_wizard_key', '' );
-		$has_valid_dev   = ! empty( $wizard_key ) && ! empty( $query['dev_key'] ) && hash_equals( $wizard_key, (string) $query['dev_key'] );
-		$from_local      = ! empty( $query['return_origin'] ) && ( strpos( $query['return_origin'], 'localhost' ) !== false || strpos( $query['return_origin'], '127.0.0.1' ) !== false );
-		$force_test_mode = $test_requested || $has_valid_dev || $from_local;
 
 		$payload = array(
 			'price'        => $price,
