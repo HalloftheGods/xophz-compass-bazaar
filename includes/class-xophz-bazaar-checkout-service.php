@@ -134,6 +134,24 @@ class Xophz_Bazaar_Checkout_Service {
 		$dynamic_resolved = apply_filters( 'xophz_resolve_buy_request', null, $segments, $query );
 
 		if ( is_array( $dynamic_resolved ) && ! empty( $dynamic_resolved['handled'] ) ) {
+			// Attach verified success and cancel URLs if not provided
+			if ( empty( $dynamic_resolved['success_url'] ) || empty( $dynamic_resolved['cancel_url'] ) ) {
+				$return_url = ! empty( $query['return_url'] ) ? esc_url_raw( $query['return_url'] ) : '';
+				$is_allowed = class_exists( 'Xophz_Compass_Security' )
+					? Xophz_Compass_Security::is_allowed_redirect_url( $return_url )
+					: ! empty( $return_url );
+
+				$target_slug = sanitize_key( $dynamic_resolved['metadata']['plugin_slug'] ?? ( $segments[0] ?? '' ) );
+
+				if ( $is_allowed ) {
+					$sep = ( strpos( $return_url, '?' ) !== false ) ? '&' : '?';
+					$dynamic_resolved['success_url'] = $dynamic_resolved['success_url'] ?? ( $return_url . $sep . 'session_id={CHECKOUT_SESSION_ID}' . ( ! empty( $target_slug ) ? '&purchased=' . $target_slug : '' ) );
+					$dynamic_resolved['cancel_url']  = $dynamic_resolved['cancel_url'] ?? ( $return_url . $sep . 'status=cancelled' );
+				} else {
+					$dynamic_resolved['success_url'] = $dynamic_resolved['success_url'] ?? home_url( '/callback/stripe?status=success&session_id={CHECKOUT_SESSION_ID}&purchased=' . $target_slug );
+					$dynamic_resolved['cancel_url']  = $dynamic_resolved['cancel_url'] ?? home_url( '/callback/stripe?status=cancel' );
+				}
+			}
 			return self::create_stripe_session( $dynamic_resolved, $method );
 		}
 
@@ -187,23 +205,32 @@ class Xophz_Bazaar_Checkout_Service {
 		$tier_id   = sanitize_key( (string) ( $target_item['tier'] ?? $resolved_key ) );
 
 		// Determine Success & Cancel URLs
+		$return_url = ! empty( $query['return_url'] ) ? esc_url_raw( $query['return_url'] ) : '';
+		$is_allowed_return = ! empty( $return_url ) && ( class_exists( 'Xophz_Compass_Security' ) ? Xophz_Compass_Security::is_allowed_redirect_url( $return_url ) : true );
+
 		$return_origin = ! empty( $query['return_origin'] )
 			? rtrim( esc_url_raw( $query['return_origin'] ), '/' )
 			: ( strpos( $resolved_key, 'chemical-x' ) !== false ? 'https://awesome-secret-sauce.pages.dev' : home_url() );
 
-		$success_url = ! empty( $query['success_url'] )
-			? esc_url_raw( $query['success_url'] )
-			: ( strpos( $resolved_key, 'chemical-x' ) !== false
-				? "{$return_origin}/?session_id={CHECKOUT_SESSION_ID}&status=success&tier={$tier_id}&device_id={$device_id}"
-				: home_url( "/callback/stripe?status=success&tier={$tier_id}&session_id={CHECKOUT_SESSION_ID}" )
-			);
+		if ( $is_allowed_return ) {
+			$sep = ( strpos( $return_url, '?' ) !== false ) ? '&' : '?';
+			$success_url = $return_url . $sep . "session_id={CHECKOUT_SESSION_ID}&status=success&tier={$tier_id}&purchased={$tier_id}";
+			$cancel_url  = $return_url . $sep . 'status=cancelled';
+		} else {
+			$success_url = ! empty( $query['success_url'] )
+				? esc_url_raw( $query['success_url'] )
+				: ( strpos( $resolved_key, 'chemical-x' ) !== false
+					? "{$return_origin}/?session_id={CHECKOUT_SESSION_ID}&status=success&tier={$tier_id}&device_id={$device_id}"
+					: home_url( "/callback/stripe?status=success&tier={$tier_id}&session_id={CHECKOUT_SESSION_ID}" )
+				);
 
-		$cancel_url = ! empty( $query['cancel_url'] )
-			? esc_url_raw( $query['cancel_url'] )
-			: ( strpos( $resolved_key, 'chemical-x' ) !== false
-				? "{$return_origin}/?status=cancelled"
-				: home_url( "/callback/stripe?status=cancel&tier={$tier_id}" )
-			);
+			$cancel_url = ! empty( $query['cancel_url'] )
+				? esc_url_raw( $query['cancel_url'] )
+				: ( strpos( $resolved_key, 'chemical-x' ) !== false
+					? "{$return_origin}/?status=cancelled"
+					: home_url( "/callback/stripe?status=cancel&tier={$tier_id}" )
+				);
+		}
 
 		// Detect sandbox / test checkout request
 		$test_requested  = ! empty( $query['test'] ) || ! empty( $query['test_mode'] ) || ! empty( $query['sandbox'] );
@@ -300,7 +327,8 @@ class Xophz_Bazaar_Checkout_Service {
 		);
 
 		if ( $mode === 'subscription' ) {
-			$body['line_items[0][price_data][recurring][interval]'] = 'month';
+			$interval = ! empty( $data['interval'] ) ? sanitize_key( $data['interval'] ) : 'month';
+			$body['line_items[0][price_data][recurring][interval]'] = $interval;
 
 			// Legacy Tesseract White Glove setup fee ($749)
 			if ( ! $is_diy && ( strpos( strtolower( $product_name ), 'tesseract' ) !== false || strpos( strtolower( $product_name ), 'white glove' ) !== false ) ) {
