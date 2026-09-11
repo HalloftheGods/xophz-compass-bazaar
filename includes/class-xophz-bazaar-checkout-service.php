@@ -108,11 +108,14 @@ class Xophz_Bazaar_Checkout_Service {
 			'uranium-plus'       => array( 'name' => 'Uranium Plus', 'diy_price' => 300.00, 'white_glove_price' => 2499.00, 'hours' => 15, 'mode' => 'subscription' ),
 
 			// Chemical X Interactive Architecture Vault
-			'chemical-x/standard' => array( 'name' => 'Chemical X: Standard Vault Access', 'price' => 27.00, 'mode' => 'payment', 'product' => 'chemical-x', 'tier' => 'standard' ),
-			'chemical-x-standard' => array( 'name' => 'Chemical X: Standard Vault Access', 'price' => 27.00, 'mode' => 'payment', 'product' => 'chemical-x', 'tier' => 'standard' ),
-			'chemical-x/master'   => array( 'name' => 'Chemical X: VIP Master Bundle', 'price' => 47.00, 'mode' => 'payment', 'product' => 'chemical-x', 'tier' => 'vip_bundle' ),
-			'chemical-x-master'   => array( 'name' => 'Chemical X: VIP Master Bundle', 'price' => 47.00, 'mode' => 'payment', 'product' => 'chemical-x', 'tier' => 'vip_bundle' ),
-			'chemical-x/vip'      => array( 'name' => 'Chemical X: VIP Master Bundle', 'price' => 47.00, 'mode' => 'payment', 'product' => 'chemical-x', 'tier' => 'vip_bundle' ),
+			'chemical-x/standard'   => array( 'name' => 'Chemical X: Single Developer License', 'price' => 27.00, 'mode' => 'payment', 'product' => 'chemical-x', 'tier' => 'standard' ),
+			'chemical-x-standard'   => array( 'name' => 'Chemical X: Single Developer License', 'price' => 27.00, 'mode' => 'payment', 'product' => 'chemical-x', 'tier' => 'standard' ),
+			'chemical-x/master'     => array( 'name' => 'Chemical X: Team Power Puff (Unlimited Lifetime)', 'price' => 97.00, 'mode' => 'payment', 'product' => 'chemical-x', 'tier' => 'vip_bundle' ),
+			'chemical-x-master'     => array( 'name' => 'Chemical X: Team Power Puff (Unlimited Lifetime)', 'price' => 97.00, 'mode' => 'payment', 'product' => 'chemical-x', 'tier' => 'vip_bundle' ),
+			'chemical-x/vip'        => array( 'name' => 'Chemical X: Team Power Puff (Unlimited Lifetime)', 'price' => 97.00, 'mode' => 'payment', 'product' => 'chemical-x', 'tier' => 'vip_bundle' ),
+			'chemical-x/power-puff' => array( 'name' => 'Chemical X: Team Power Puff (Unlimited Lifetime)', 'price' => 97.00, 'mode' => 'payment', 'product' => 'chemical-x', 'tier' => 'vip_bundle' ),
+			'chemical-x-power-puff' => array( 'name' => 'Chemical X: Team Power Puff (Unlimited Lifetime)', 'price' => 97.00, 'mode' => 'payment', 'product' => 'chemical-x', 'tier' => 'vip_bundle' ),
+			'chemical-x/team'       => array( 'name' => 'Chemical X: Team Power Puff (Unlimited Lifetime)', 'price' => 97.00, 'mode' => 'payment', 'product' => 'chemical-x', 'tier' => 'vip_bundle' ),
 
 			// Developer UI Kit & Compass Engine Offerings
 			'ui-kit'              => array( 'name' => 'Glassmorphic UI Kit (Single Site License)', 'price' => 49.98, 'mode' => 'payment' ),
