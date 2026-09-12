@@ -18,7 +18,7 @@
  * Plugin Name:       Xophz Bazaar Warehouse
  * Plugin URI:        https://github.com/HalloftheGods/xophz-compass-bazaar
  * Description:       Manage inventory stock levels, order fulfillment, point of sale transactions, and financial revenue analytics in real time.
- * Version:           26.9.12-1158
+ * Version:           26.9.12-1180
  * Author:            Hall of the Gods, Inc.
  * Author URI:        https://youmeos.com/
  * License:           GPL-2.0+
@@ -38,7 +38,7 @@ if ( ! defined( 'WPINC' ) ) {
  * Start at version 1.0.0 and use SemVer - https://semver.org
  * Rename this for your plugin and update it as you release new versions.
  */
-define( 'XOPHZ_COMPASS_BAZAAR_VERSION', '26.9.12-1158' );
+define( 'XOPHZ_COMPASS_BAZAAR_VERSION', '26.9.12-1180' );
 
 /**
  * The code that runs during plugin activation.
