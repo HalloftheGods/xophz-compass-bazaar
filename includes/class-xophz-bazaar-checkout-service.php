@@ -117,6 +117,25 @@ class Xophz_Bazaar_Checkout_Service {
 			'chemical-x-power-puff' => array( 'name' => 'Chemical X: Team Power Puff (Unlimited Lifetime)', 'price' => 97.00, 'mode' => 'payment', 'product' => 'chemical-x', 'tier' => 'vip_bundle' ),
 			'chemical-x/team'       => array( 'name' => 'Chemical X: Team Power Puff (Unlimited Lifetime)', 'price' => 97.00, 'mode' => 'payment', 'product' => 'chemical-x', 'tier' => 'vip_bundle' ),
 
+			// Card Vault Pro & Shop Software Licenses
+			'card-vault/single-annual'   => array( 'name' => 'Card Vault: Single Dealer License (Annual Subscription)', 'price' => 99.00, 'mode' => 'subscription', 'interval' => 'year', 'trial_days' => 3, 'product' => 'card-vault', 'tier' => 'single' ),
+			'card-vault-single-annual'   => array( 'name' => 'Card Vault: Single Dealer License (Annual Subscription)', 'price' => 99.00, 'mode' => 'subscription', 'interval' => 'year', 'trial_days' => 3, 'product' => 'card-vault', 'tier' => 'single' ),
+			'card-vault/single-lifetime' => array( 'name' => 'Card Vault: Single Dealer License (Lifetime Access)', 'price' => 249.00, 'mode' => 'payment', 'product' => 'card-vault', 'tier' => 'single_lifetime' ),
+			'card-vault-single-lifetime' => array( 'name' => 'Card Vault: Single Dealer License (Lifetime Access)', 'price' => 249.00, 'mode' => 'payment', 'product' => 'card-vault', 'tier' => 'single_lifetime' ),
+			'card-vault/single'          => array( 'name' => 'Card Vault: Single Dealer License (Annual Subscription)', 'price' => 99.00, 'mode' => 'subscription', 'interval' => 'year', 'trial_days' => 3, 'product' => 'card-vault', 'tier' => 'single' ),
+
+			'card-vault/team-annual'     => array( 'name' => 'Card Vault: Team & Card Shop License (Annual Subscription)', 'price' => 249.00, 'mode' => 'subscription', 'interval' => 'year', 'trial_days' => 7, 'product' => 'card-vault', 'tier' => 'team' ),
+			'card-vault-team-annual'     => array( 'name' => 'Card Vault: Team & Card Shop License (Annual Subscription)', 'price' => 249.00, 'mode' => 'subscription', 'interval' => 'year', 'trial_days' => 7, 'product' => 'card-vault', 'tier' => 'team' ),
+			'card-vault/team-lifetime'   => array( 'name' => 'Card Vault: Team & Card Shop License (Lifetime Access)', 'price' => 599.00, 'mode' => 'payment', 'product' => 'card-vault', 'tier' => 'team_lifetime' ),
+			'card-vault-team-lifetime'   => array( 'name' => 'Card Vault: Team & Card Shop License (Lifetime Access)', 'price' => 599.00, 'mode' => 'payment', 'product' => 'card-vault', 'tier' => 'team_lifetime' ),
+			'card-vault/team'            => array( 'name' => 'Card Vault: Team & Card Shop License (Annual Subscription)', 'price' => 249.00, 'mode' => 'subscription', 'interval' => 'year', 'trial_days' => 7, 'product' => 'card-vault', 'tier' => 'team' ),
+			'card-vault'                 => array( 'name' => 'Card Vault: Single Dealer License (Annual Subscription)', 'price' => 99.00, 'mode' => 'subscription', 'interval' => 'year', 'trial_days' => 3, 'product' => 'card-vault', 'tier' => 'single' ),
+
+			// Sovereign BlackBox Node: Turnkey Card Shop Website & Consignment Portal
+			'card-vault/node'            => array( 'name' => 'Card Vault: Sovereign BlackBox Shop Node (Annual Subscription)', 'price' => 499.00, 'mode' => 'subscription', 'interval' => 'year', 'product' => 'card-vault', 'tier' => 'node' ),
+			'card-vault-node'            => array( 'name' => 'Card Vault: Sovereign BlackBox Shop Node (Annual Subscription)', 'price' => 499.00, 'mode' => 'subscription', 'interval' => 'year', 'product' => 'card-vault', 'tier' => 'node' ),
+			'card-vault/turnkey'         => array( 'name' => 'Card Vault: Sovereign BlackBox Shop Node (Turnkey Lifetime)', 'price' => 999.00, 'mode' => 'payment', 'product' => 'card-vault', 'tier' => 'turnkey' ),
+
 			// Developer UI Kit & Compass Engine Offerings
 			'ui-kit'              => array( 'name' => 'Glassmorphic UI Kit (Single Site License)', 'price' => 49.98, 'mode' => 'payment' ),
 			'ui-kit-agency'       => array( 'name' => 'Glassmorphic UI Kit (Agency 5-Site License)', 'price' => 149.98, 'mode' => 'payment' ),
@@ -191,6 +210,17 @@ class Xophz_Bazaar_Checkout_Service {
 			return new WP_Error( 'not_found', 'Requested checkout target could not be found.', array( 'status' => 404 ) );
 		}
 
+		// Handle billing modifier for Card Vault (e.g. ?billing=lifetime or ?billing=annual)
+		$billing_cycle = sanitize_key( (string) ( $query['billing'] ?? $query['cycle'] ?? '' ) );
+		if ( strpos( $resolved_key, 'card-vault' ) !== false && ! empty( $billing_cycle ) ) {
+			$sub_tier = ( strpos( $resolved_key, 'team' ) !== false ) ? 'team' : 'single';
+			$alt_key  = "card-vault/{$sub_tier}-{$billing_cycle}";
+			if ( isset( $catalog[ $alt_key ] ) ) {
+				$target_item  = $catalog[ $alt_key ];
+				$resolved_key = $alt_key;
+			}
+		}
+
 		// Resolve plan mode (DIY vs White Glove for Tesseract, or single price)
 		$plan_mode = sanitize_key( (string) (
 			$query['plan'] ??
@@ -215,8 +245,10 @@ class Xophz_Bazaar_Checkout_Service {
 			$name  = 'Tesseract ' . $target_item['name'] . 'BOX - White Glove Concierge' . $hours;
 		}
 
-		$device_id = sanitize_text_field( (string) ( $query['device_id'] ?? $query['deviceId'] ?? '' ) );
-		$tier_id   = sanitize_key( (string) ( $target_item['tier'] ?? $resolved_key ) );
+		$device_id  = sanitize_text_field( (string) ( $query['device_id'] ?? $query['deviceId'] ?? '' ) );
+		$tier_id    = sanitize_key( (string) ( $target_item['tier'] ?? $resolved_key ) );
+		$interval   = $target_item['interval'] ?? ( $query['interval'] ?? ( $mode === 'subscription' ? 'year' : '' ) );
+		$trial_days = isset( $target_item['trial_days'] ) ? intval( $target_item['trial_days'] ) : ( isset( $query['trial_days'] ) ? intval( $query['trial_days'] ) : 0 );
 
 		// Determine Success & Cancel URLs
 		$return_url = ! empty( $query['return_url'] ) ? esc_url_raw( $query['return_url'] ) : '';
@@ -224,7 +256,11 @@ class Xophz_Bazaar_Checkout_Service {
 
 		$return_origin = ! empty( $query['return_origin'] )
 			? rtrim( esc_url_raw( $query['return_origin'] ), '/' )
-			: ( strpos( $resolved_key, 'chemical-x' ) !== false ? 'https://awesome-secret-sauce.pages.dev' : home_url() );
+			: ( strpos( $resolved_key, 'chemical-x' ) !== false
+				? 'https://awesome-secret-sauce.pages.dev'
+				: ( strpos( $resolved_key, 'card-vault' ) !== false
+					? home_url( '/card-vault' )
+					: home_url() ) );
 
 		if ( $is_allowed_return ) {
 			$sep = ( strpos( $return_url, '?' ) !== false ) ? '&' : '?';
@@ -251,16 +287,20 @@ class Xophz_Bazaar_Checkout_Service {
 			'product_name' => $name,
 			'license'      => $name,
 			'mode'         => $mode,
+			'interval'     => $interval,
+			'trial_days'   => $trial_days,
 			'is_diy'       => $is_diy,
 			'success_url'  => $success_url,
 			'cancel_url'   => $cancel_url,
 			'force_test'   => $force_test_mode,
 			'metadata'     => array(
-				'route'     => $full_path,
-				'tier'      => $tier_id,
-				'device_id' => $device_id,
-				'source'    => 'bazaar_buy_router',
-				'env'       => $force_test_mode ? 'sandbox' : 'production',
+				'route'      => $full_path,
+				'tier'       => $tier_id,
+				'trial_days' => $trial_days,
+				'interval'   => $interval,
+				'device_id'  => $device_id,
+				'source'     => 'bazaar_buy_router',
+				'env'        => $force_test_mode ? 'sandbox' : 'production',
 			),
 		);
 
@@ -301,6 +341,9 @@ class Xophz_Bazaar_Checkout_Service {
 				'mock_checkout' => '1',
 				'price'         => $price,
 				'product_name'  => urlencode( $product_name ),
+				'mode'          => $mode,
+				'interval'      => $data['interval'] ?? '',
+				'trial_days'    => $data['trial_days'] ?? '',
 				'success_url'   => urlencode( $success_url ),
 				'cancel_url'    => urlencode( $cancel_url ),
 			), home_url( '/callback/stripe' ) );
@@ -336,6 +379,11 @@ class Xophz_Bazaar_Checkout_Service {
 		if ( $mode === 'subscription' ) {
 			$interval = ! empty( $data['interval'] ) ? sanitize_key( $data['interval'] ) : 'month';
 			$body['line_items[0][price_data][recurring][interval]'] = $interval;
+
+			$trial_days = isset( $data['trial_days'] ) ? intval( $data['trial_days'] ) : 0;
+			if ( $trial_days > 0 ) {
+				$body['subscription_data[trial_period_days]'] = $trial_days;
+			}
 
 			// Legacy Tesseract White Glove setup fee ($749)
 			if ( ! $is_diy && ( strpos( strtolower( $product_name ), 'tesseract' ) !== false || strpos( strtolower( $product_name ), 'white glove' ) !== false ) ) {
