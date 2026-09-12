@@ -175,6 +175,9 @@ class Xophz_Bazaar_Checkout_Service {
 
 		if ( is_array( $dynamic_resolved ) && ! empty( $dynamic_resolved['handled'] ) ) {
 			$dynamic_resolved['force_test'] = $dynamic_resolved['force_test'] ?? $force_test_mode;
+			if ( ! isset( $dynamic_resolved['trial_days'] ) && isset( $query['trial_days'] ) ) {
+				$dynamic_resolved['trial_days'] = intval( $query['trial_days'] );
+			}
 
 			// Attach verified success and cancel URLs if not provided
 			if ( empty( $dynamic_resolved['success_url'] ) || empty( $dynamic_resolved['cancel_url'] ) ) {
