@@ -131,10 +131,19 @@ class Xophz_Bazaar_Checkout_Service {
 			'card-vault/team'            => array( 'name' => 'Card Vault: Team & Card Shop License (Annual Subscription)', 'price' => 249.00, 'mode' => 'subscription', 'interval' => 'year', 'trial_days' => 7, 'product' => 'card-vault', 'tier' => 'team' ),
 			'card-vault'                 => array( 'name' => 'Card Vault: Single Dealer License (Annual Subscription)', 'price' => 99.00, 'mode' => 'subscription', 'interval' => 'year', 'trial_days' => 3, 'product' => 'card-vault', 'tier' => 'single' ),
 
-			// Sovereign BlackBox Node: Turnkey Card Shop Website & Consignment Portal
-			'card-vault/node'            => array( 'name' => 'Card Vault: Sovereign BlackBox Shop Node (Annual Subscription)', 'price' => 499.00, 'mode' => 'subscription', 'interval' => 'year', 'product' => 'card-vault', 'tier' => 'node' ),
-			'card-vault-node'            => array( 'name' => 'Card Vault: Sovereign BlackBox Shop Node (Annual Subscription)', 'price' => 499.00, 'mode' => 'subscription', 'interval' => 'year', 'product' => 'card-vault', 'tier' => 'node' ),
-			'card-vault/turnkey'         => array( 'name' => 'Card Vault: Sovereign BlackBox Shop Node (Turnkey Lifetime)', 'price' => 999.00, 'mode' => 'payment', 'product' => 'card-vault', 'tier' => 'turnkey' ),
+			// Sovereign BlackBox Node: Turnkey Card Shop Website & Consignment Portal ($99/mo or $999/yr)
+			'card-vault/node-monthly'     => array( 'name' => 'Card Vault: Sovereign BlackBox Shop Node (Monthly Subscription)', 'price' => 99.00, 'mode' => 'subscription', 'interval' => 'month', 'product' => 'card-vault', 'tier' => 'node' ),
+			'card-vault-node-monthly'     => array( 'name' => 'Card Vault: Sovereign BlackBox Shop Node (Monthly Subscription)', 'price' => 99.00, 'mode' => 'subscription', 'interval' => 'month', 'product' => 'card-vault', 'tier' => 'node' ),
+			'card-vault/node-annual'      => array( 'name' => 'Card Vault: Sovereign BlackBox Shop Node (Annual Subscription)', 'price' => 999.00, 'mode' => 'subscription', 'interval' => 'year', 'product' => 'card-vault', 'tier' => 'node' ),
+			'card-vault-node-annual'      => array( 'name' => 'Card Vault: Sovereign BlackBox Shop Node (Annual Subscription)', 'price' => 999.00, 'mode' => 'subscription', 'interval' => 'year', 'product' => 'card-vault', 'tier' => 'node' ),
+			'card-vault/node'             => array( 'name' => 'Card Vault: Sovereign BlackBox Shop Node (Annual Subscription)', 'price' => 999.00, 'mode' => 'subscription', 'interval' => 'year', 'product' => 'card-vault', 'tier' => 'node' ),
+			'card-vault-node'             => array( 'name' => 'Card Vault: Sovereign BlackBox Shop Node (Annual Subscription)', 'price' => 999.00, 'mode' => 'subscription', 'interval' => 'year', 'product' => 'card-vault', 'tier' => 'node' ),
+			'card-vault/turnkey-monthly'  => array( 'name' => 'Card Vault: Sovereign Turnkey Website (Monthly Subscription)', 'price' => 99.00, 'mode' => 'subscription', 'interval' => 'month', 'product' => 'card-vault', 'tier' => 'turnkey' ),
+			'card-vault-turnkey-monthly'  => array( 'name' => 'Card Vault: Sovereign Turnkey Website (Monthly Subscription)', 'price' => 99.00, 'mode' => 'subscription', 'interval' => 'month', 'product' => 'card-vault', 'tier' => 'turnkey' ),
+			'card-vault/turnkey-annual'   => array( 'name' => 'Card Vault: Sovereign Turnkey Website (Annual Subscription)', 'price' => 999.00, 'mode' => 'subscription', 'interval' => 'year', 'product' => 'card-vault', 'tier' => 'turnkey' ),
+			'card-vault-turnkey-annual'   => array( 'name' => 'Card Vault: Sovereign Turnkey Website (Annual Subscription)', 'price' => 999.00, 'mode' => 'subscription', 'interval' => 'year', 'product' => 'card-vault', 'tier' => 'turnkey' ),
+			'card-vault/turnkey'          => array( 'name' => 'Card Vault: Sovereign Turnkey Website (Annual Subscription)', 'price' => 999.00, 'mode' => 'subscription', 'interval' => 'year', 'product' => 'card-vault', 'tier' => 'turnkey' ),
+			'card-vault-turnkey'          => array( 'name' => 'Card Vault: Sovereign Turnkey Website (Annual Subscription)', 'price' => 999.00, 'mode' => 'subscription', 'interval' => 'year', 'product' => 'card-vault', 'tier' => 'turnkey' ),
 
 			// Developer UI Kit & Compass Engine Offerings
 			'ui-kit'              => array( 'name' => 'Glassmorphic UI Kit (Single Site License)', 'price' => 49.98, 'mode' => 'payment' ),
