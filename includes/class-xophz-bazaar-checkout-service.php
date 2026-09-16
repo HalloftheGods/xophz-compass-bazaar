@@ -316,6 +316,16 @@ class Xophz_Bazaar_Checkout_Service {
 			),
 		);
 
+		if ( ! empty( $query['referral_code'] ) || ! empty( $query['ref'] ) ) {
+			$payload['metadata']['referral_code'] = sanitize_text_field( (string) ( $query['referral_code'] ?? $query['ref'] ) );
+		}
+		if ( ! empty( $query['referrer_id'] ) ) {
+			$payload['metadata']['referrer_id'] = intval( $query['referrer_id'] );
+		}
+		if ( ! empty( $query['commission_rate'] ) ) {
+			$payload['metadata']['commission_rate'] = floatval( $query['commission_rate'] );
+		}
+
 		return self::create_stripe_session( $payload, $method );
 	}
 
