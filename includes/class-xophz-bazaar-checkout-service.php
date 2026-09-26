@@ -225,7 +225,14 @@ class Xophz_Bazaar_Checkout_Service {
 		// Handle billing modifier for Card Vault (e.g. ?billing=lifetime or ?billing=annual)
 		$billing_cycle = sanitize_key( (string) ( $query['billing'] ?? $query['cycle'] ?? '' ) );
 		if ( strpos( $resolved_key, 'card-vault' ) !== false && ! empty( $billing_cycle ) ) {
-			$sub_tier = ( strpos( $resolved_key, 'team' ) !== false ) ? 'team' : 'single';
+			$sub_tier = 'single';
+			if ( strpos( $resolved_key, 'team' ) !== false ) {
+				$sub_tier = 'team';
+			} elseif ( strpos( $resolved_key, 'turnkey' ) !== false ) {
+				$sub_tier = 'turnkey';
+			} elseif ( strpos( $resolved_key, 'node' ) !== false ) {
+				$sub_tier = 'node';
+			}
 			$alt_key  = "card-vault/{$sub_tier}-{$billing_cycle}";
 			if ( isset( $catalog[ $alt_key ] ) ) {
 				$target_item  = $catalog[ $alt_key ];
