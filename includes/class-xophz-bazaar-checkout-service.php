@@ -14,66 +14,18 @@ if ( ! defined( 'ABSPATH' ) && ! defined( 'WPINC' ) ) {
 	die;
 }
 
+require_once __DIR__ . '/class-xophz-bazaar-stripe-key.php';
+
 class Xophz_Bazaar_Checkout_Service {
 
 	/**
-	 * Retrieve the active Stripe Secret Key across WordPress options, constants, and environment.
+	 * Retrieve the active Stripe secret key from the Connectors API (Settings > Connectors).
 	 *
 	 * @param bool $force_test Whether to force selection of the Stripe Test Key.
 	 * @return string
 	 */
 	public static function get_stripe_secret_key( bool $force_test = false ): string {
-		$is_local = false;
-		if ( defined( 'WP_ENVIRONMENT_TYPE' ) && in_array( WP_ENVIRONMENT_TYPE, array( 'local', 'development' ), true ) ) {
-			$is_local = true;
-		} elseif ( ! empty( $_SERVER['HTTP_HOST'] ) && ( strpos( $_SERVER['HTTP_HOST'], 'localhost' ) !== false || strpos( $_SERVER['HTTP_HOST'], '127.0.0.1' ) !== false || strpos( $_SERVER['HTTP_HOST'], '.local' ) !== false ) ) {
-			$is_local = true;
-		}
-
-		$test_keys = array(
-			get_option( 'compass_stripe_test_secret_key' ),
-			get_option( 'stripe_test_secret_key' ),
-			defined( 'STRIPE_TEST_SECRET_KEY' ) ? STRIPE_TEST_SECRET_KEY : '',
-			getenv( 'STRIPE_TEST_SECRET_KEY' ) ?: '',
-			isset( $_ENV['STRIPE_TEST_SECRET_KEY'] ) ? $_ENV['STRIPE_TEST_SECRET_KEY'] : '',
-		);
-
-		$resolved_test_key = '';
-		foreach ( $test_keys as $tk ) {
-			$trimmed = trim( (string) $tk );
-			if ( ! empty( $trimmed ) ) {
-				$resolved_test_key = $trimmed;
-				break;
-			}
-		}
-
-		// When developing locally or when test mode is forced, prioritize the Stripe Test Key
-		if ( ( $force_test || $is_local ) && ! empty( $resolved_test_key ) ) {
-			return $resolved_test_key;
-		}
-
-		$live_keys = array(
-			get_option( 'compass_stripe_secret_key' ),
-			get_option( 'xophz_compass_stripe_secret_key' ),
-			get_option( 'stripe_secret_key' ),
-			defined( 'STRIPE_SECRET_KEY' ) ? STRIPE_SECRET_KEY : '',
-			getenv( 'STRIPE_SECRET_KEY' ) ?: '',
-			isset( $_ENV['STRIPE_SECRET_KEY'] ) ? $_ENV['STRIPE_SECRET_KEY'] : '',
-		);
-
-		foreach ( $live_keys as $k ) {
-			$trimmed = trim( (string) $k );
-			if ( ! empty( $trimmed ) ) {
-				return $trimmed;
-			}
-		}
-
-		// Fallback to test key if no live key is configured
-		if ( ! empty( $resolved_test_key ) ) {
-			return $resolved_test_key;
-		}
-
-		return '';
+		return Xophz_Bazaar_Stripe_Key::resolve( $force_test );
 	}
 
 	/**
@@ -164,11 +116,9 @@ class Xophz_Bazaar_Checkout_Service {
 	public static function process_buy_request( array $segments, array $query = array(), string $method = 'GET' ) {
 		// Detect sandbox / test checkout request
 		$test_requested  = ! empty( $query['test'] ) || ! empty( $query['test_mode'] ) || ! empty( $query['sandbox'] );
-		$wizard_key      = get_option( 'compass_wizard_key', '' );
-		$has_valid_dev   = ! empty( $wizard_key ) && ! empty( $query['dev_key'] ) && hash_equals( $wizard_key, (string) $query['dev_key'] );
 		$from_local      = ( ! empty( $query['return_origin'] ) && ( strpos( $query['return_origin'], 'localhost' ) !== false || strpos( $query['return_origin'], '127.0.0.1' ) !== false ) )
 			|| ( ! empty( $query['return_url'] ) && ( strpos( $query['return_url'], 'localhost' ) !== false || strpos( $query['return_url'], '127.0.0.1' ) !== false ) );
-		$force_test_mode = $test_requested || $has_valid_dev || $from_local;
+		$force_test_mode = $test_requested || $from_local;
 
 		// 1. Give external plugins first right of refusal via dynamic resolution hook
 		$dynamic_resolved = apply_filters( 'xophz_resolve_buy_request', null, $segments, $query );
