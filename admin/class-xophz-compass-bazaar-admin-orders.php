@@ -89,6 +89,69 @@ class Xophz_Compass_Bazaar_Admin_Orders {
       Xophz_Compass::output_json($payload);
   }
 
+  /**
+   * Shape one order the way the Bazaar SPA reads it (order-details-dialog,
+   * orders table, fulfillment board).
+   *
+   * @param int $id Order id.
+   * @return array|null
+   */
+  public static function map_order_data($id){
+    $order = wc_get_order($id);
+    if (!$order || is_wp_error($order)) {
+        return null;
+    }
+    $data = $order->get_data();
+    $data['order'] = $order->get_order_number();
+    $data['currency_symbol'] = html_entity_decode(get_woocommerce_currency_symbol($order->get_currency()), ENT_QUOTES, 'UTF-8');
+    
+    if (isset($data['date_created']) && is_a($data['date_created'], 'WC_DateTime')) {
+        $data['date_created'] = $data['date_created']->date('Y-m-d H:i:s');
+    }
+    
+    $cashier_id = $order->get_meta('_pos_cashier_id');
+    if ($cashier_id) {
+        $cashier = get_userdata($cashier_id);
+        if ($cashier) {
+            $data['cashier_name'] = $cashier->display_name;
+        }
+    }
+    if (empty($data['cashier_name'])) {
+        $data['cashier_name'] = 'System / Online Store';
+    }
+
+    $formatted_items = [];
+    foreach ($order->get_items() as $item_id => $item) {
+        $product = $item->get_product();
+        $thumb = '';
+        $sku = '';
+        if ($product) {
+            $sku = $product->get_sku();
+            $image_id = $product->get_image_id();
+            if ($image_id) {
+                $thumb_src = wp_get_attachment_image_src($image_id, 'thumbnail');
+                if ($thumb_src) {
+                    $thumb = $thumb_src[0];
+                }
+            }
+        }
+
+        $formatted_items[] = [
+            'id' => $item_id,
+            'name' => $item->get_name(),
+            'product_id' => $item->get_product_id(),
+            'variation_id' => $item->get_variation_id(),
+            'quantity' => $item->get_quantity(),
+            'subtotal' => floatval($item->get_subtotal()),
+            'total' => floatval($item->get_total()),
+            'sku' => $sku,
+            'thumb' => $thumb
+        ];
+    }
+    $data['line_items'] = $formatted_items;
+    
+    return $data;
+  }
   public function getOrders(){
     try {
       if (!current_user_can('manage_woocommerce') && !current_user_can('edit_shop_orders')) {
@@ -102,62 +165,7 @@ class Xophz_Compass_Bazaar_Admin_Orders {
           throw new \Exception($orderIds->get_error_message());
       }
 
-      $mapOrderData = function($id){
-        $order = wc_get_order($id);
-        if (!$order || is_wp_error($order)) {
-            return null;
-        }
-        $data = $order->get_data();
-        $data['order'] = $order->get_order_number();
-        $data['currency_symbol'] = html_entity_decode(get_woocommerce_currency_symbol($order->get_currency()), ENT_QUOTES, 'UTF-8');
-        
-        if (isset($data['date_created']) && is_a($data['date_created'], 'WC_DateTime')) {
-            $data['date_created'] = $data['date_created']->date('Y-m-d H:i:s');
-        }
-        
-        $cashier_id = $order->get_meta('_pos_cashier_id');
-        if ($cashier_id) {
-            $cashier = get_userdata($cashier_id);
-            if ($cashier) {
-                $data['cashier_name'] = $cashier->display_name;
-            }
-        }
-        if (empty($data['cashier_name'])) {
-            $data['cashier_name'] = 'System / Online Store';
-        }
-
-        $formatted_items = [];
-        foreach ($order->get_items() as $item_id => $item) {
-            $product = $item->get_product();
-            $thumb = '';
-            $sku = '';
-            if ($product) {
-                $sku = $product->get_sku();
-                $image_id = $product->get_image_id();
-                if ($image_id) {
-                    $thumb_src = wp_get_attachment_image_src($image_id, 'thumbnail');
-                    if ($thumb_src) {
-                        $thumb = $thumb_src[0];
-                    }
-                }
-            }
-
-            $formatted_items[] = [
-                'id' => $item_id,
-                'name' => $item->get_name(),
-                'product_id' => $item->get_product_id(),
-                'variation_id' => $item->get_variation_id(),
-                'quantity' => $item->get_quantity(),
-                'subtotal' => floatval($item->get_subtotal()),
-                'total' => floatval($item->get_total()),
-                'sku' => $sku,
-                'thumb' => $thumb
-            ];
-        }
-        $data['line_items'] = $formatted_items;
-        
-        return $data;
-      };
+      $mapOrderData = [ self::class, 'map_order_data' ];
 
       $raw_orders = isset($orderIds->orders) && is_array($orderIds->orders) ? $orderIds->orders : [];
       $orders_data = array_values(array_filter(array_map( $mapOrderData, $raw_orders )));

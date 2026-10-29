@@ -151,6 +151,13 @@ class Xophz_Compass_Bazaar extends Xophz_Compass_Plugin_Base {
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-bazaar-admin-multi-inventory.php';
 
     /**
+      * The classes responsible for web order fulfillment and bulk sale pricing
+    */
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-bazaar-admin-fulfillment.php';
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/class-xophz-compass-bazaar-sale-pricing.php';
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-bazaar-admin-promotions.php';
+
+    /**
       * The class responsible for products 
     */
     // require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-bazaar-admin.php';
@@ -212,6 +219,8 @@ class Xophz_Compass_Bazaar extends Xophz_Compass_Plugin_Base {
     $this->define_class_hooks('Xophz_Compass_Bazaar_Admin_Procurement');
     $this->define_class_hooks('Xophz_Compass_Bazaar_Twilio');
     $this->define_class_hooks('Xophz_Compass_Bazaar_Admin_Multi_Inventory');
+    $this->define_class_hooks('Xophz_Compass_Bazaar_Admin_Fulfillment');
+    $this->define_class_hooks('Xophz_Compass_Bazaar_Admin_Promotions');
   } 
 
   public function define_class_hooks($class){
