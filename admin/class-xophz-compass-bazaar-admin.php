@@ -141,6 +141,8 @@ class Xophz_Compass_Bazaar_Admin {
   }
 
   public function saveProduct() {
+    Xophz_Compass_Security::enforce_spa_ajax( 'manage_woocommerce', 'edit_products' );
+
     $args = Xophz_Compass::get_input_json();
     if (!$args) {
       Xophz_Compass::output_json(['success' => false, 'message' => 'Invalid payload']);
@@ -481,6 +483,8 @@ class Xophz_Compass_Bazaar_Admin {
 
 
   public function updateProductStock(){
+    Xophz_Compass_Security::enforce_spa_ajax( 'manage_woocommerce', 'edit_products' );
+
     $args = Xophz_Compass::get_input_json();
     $product_id = isset($args->product_id) ? intval($args->product_id) : 0;
     $quantity = isset($args->quantity) ? intval($args->quantity) : 0;
