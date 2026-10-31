@@ -60,7 +60,7 @@ class Xophz_Compass_Bazaar_Admin_Orders {
     'wp_ajax_bazaar_get_bank_details' => 'getBankDetails',
     'wp_ajax_bazaar_save_bank_details' => 'saveBankDetails',
     'wp_ajax_bazaar_pos_gateway_portal' => 'renderGatewayPortal',
-    'wp_ajax_nopriv_bazaar_pos_gateway_portal' => 'renderGatewayPortal',
+    'wp_ajax_bazaar_pos_authorize_test_payment' => 'authorizeTestPayment',
   ];
 
 
@@ -619,6 +619,17 @@ class Xophz_Compass_Bazaar_Admin_Orders {
           if (abs($split_sum - $order->get_total()) >= 0.01) {
               throw new \Exception('Split payment sum does not match order total.');
           }
+      }
+
+      // Digital tenders are only paid when the server issued a one-time
+      // authorization for this cashier, method and total (#6783).
+      if ( Xophz_Compass_Bazaar_Pos_Authorization::requires_authorization( (string) $paymentMethod, (string) $method_title ) ) {
+          $token  = sanitize_text_field( (string) ( $args->authorizationToken ?? '' ) );
+          $reason = Xophz_Compass_Bazaar_Pos_Authorization::consume( $token, get_current_user_id(), sanitize_key( (string) $paymentMethod ), $order->get_total() );
+          if ( '' !== $reason ) {
+              throw new \Exception( sprintf( 'Payment not authorized (%s). %s was not charged and the sale was not recorded.', $reason, $method_title ) );
+          }
+          $order->add_order_note( 'Payment authorized through the Bazaar POS test portal (no processor connected).' );
       }
 
       // Mimic WooCommerce behavior for manual payment gateways
@@ -1432,113 +1443,131 @@ class Xophz_Compass_Bazaar_Admin_Orders {
     }
   }
 
+  /**
+   * Issue a one-time POS authorization token from the test portal.
+   *
+   * Input: gateway, amount. Only while the test portal is enabled; the token
+   * is bound to the current cashier, gateway and amount, and createPosOrder
+   * spends it.
+   */
+  public function authorizeTestPayment() {
+    Xophz_Compass_Security::enforce_spa_ajax( 'manage_woocommerce', 'edit_shop_orders' );
+
+    if ( ! Xophz_Compass_Bazaar_Pos_Authorization::is_test_portal_enabled() ) {
+      wp_send_json( [ 'success' => false, 'code' => 'test_portal_disabled', 'message' => 'The POS test payment portal is turned off on this site.' ], 403 );
+    }
+
+    $args    = Xophz_Compass::get_input_json();
+    $gateway = sanitize_key( (string) ( $args->gateway ?? '' ) );
+    $amount  = (float) ( $args->amount ?? 0 );
+    if ( '' === $gateway || $amount <= 0 ) {
+      $this->send_json_response( [ 'success' => false, 'message' => 'A payment method and an amount above zero are required.' ] );
+      return;
+    }
+
+    $this->send_json_response( [
+      'success'            => true,
+      'gatewayId'          => $gateway,
+      'authorizationToken' => Xophz_Compass_Bazaar_Pos_Authorization::issue( get_current_user_id(), $gateway, $amount ),
+    ] );
+  }
+
+  /**
+   * Test-only approval page the digital payment dialog opens in a popup.
+   *
+   * No processor is connected, so it never takes card details: it asks the
+   * server for a one-time authorization token and hands it to the register
+   * window, addressed to this site's origin only.
+   */
   public function renderGatewayPortal() {
-    $gateway_id = isset($_GET['gateway']) ? sanitize_text_field($_GET['gateway']) : 'card';
-    $amount = isset($_GET['amount']) ? floatval($_GET['amount']) : 0.00;
-    
+    Xophz_Compass_Security::enforce_spa_ajax( 'manage_woocommerce', 'edit_shop_orders' );
+
+    if ( ! Xophz_Compass_Bazaar_Pos_Authorization::is_test_portal_enabled() ) {
+      wp_die( esc_html__( 'The POS test payment portal is turned off on this site. Take this payment with cash, a card terminal, or a bank transfer.', 'xophz-compass-bazaar' ), 403 );
+    }
+
+    $gateway_id = sanitize_key( (string) ( $_GET['gateway'] ?? '' ) );
+    $amount     = isset( $_GET['amount'] ) ? (float) $_GET['amount'] : 0.0;
+
     $gateway_title = 'Digital Payment';
-    if (function_exists('WC') && WC()->payment_gateways()) {
+    if ( function_exists( 'WC' ) && WC()->payment_gateways() ) {
       $all = WC()->payment_gateways()->payment_gateways();
-      if (isset($all[$gateway_id])) {
-        $gw = $all[$gateway_id];
-        $raw_title = $gw->title ?: $gw->get_method_title();
-        $gateway_title = $this->clean_payment_title($raw_title, $gateway_id);
+      if ( isset( $all[ $gateway_id ] ) ) {
+        $gw            = $all[ $gateway_id ];
+        $gateway_title = $this->clean_payment_title( $gw->title ?: $gw->get_method_title(), $gateway_id );
       }
     }
-    
-    header('Content-Type: text/html; charset=UTF-8');
+
+    $admin_parts = wp_parse_url( admin_url() );
+    $origin      = $admin_parts['scheme'] . '://' . $admin_parts['host'] . ( isset( $admin_parts['port'] ) ? ':' . $admin_parts['port'] : '' );
+
+    header( 'Content-Type: text/html; charset=UTF-8' );
     ?>
     <!DOCTYPE html>
     <html lang="en">
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title><?php echo esc_html($gateway_title); ?> - Register Checkout Portal</title>
-      <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+      <title><?php echo esc_html( $gateway_title ); ?> - Test Payment Portal</title>
       <style>
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         body { background: #081224; color: #fff; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
-        .portal-card { background: rgba(15, 25, 45, 0.95); border: 1px solid rgba(255,255,255,0.18); border-radius: 20px; width: 100%; max-width: 440px; padding: 28px; box-shadow: 0 25px 50px rgba(0,0,0,0.6); backdrop-filter: blur(25px); }
-        .brand-badge { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #62c9ff; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 16px; }
-        .amount-badge { background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; padding: 18px; text-align: center; margin-bottom: 22px; }
-        .amount-title { font-size: 12px; color: #8a99ad; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .amount-val { font-size: 34px; font-weight: 800; color: #28c76f; }
-        .input-group { margin-bottom: 16px; text-align: left; }
-        .input-group label { font-size: 12px; color: #cbd5e1; margin-bottom: 6px; display: block; font-weight: 600; }
-        .input-group input { width: 100%; background: rgba(0,0,0,0.45); border: 1px solid rgba(255,255,255,0.2); border-radius: 10px; padding: 12px 14px; color: #fff; font-size: 14px; outline: none; transition: border-color 0.2s; }
-        .input-group input:focus { border-color: #62c9ff; box-shadow: 0 0 0 2px rgba(98, 201, 255, 0.2); }
-        .row { display: flex; gap: 12px; }
-        .btn-submit { width: 100%; background: #28c76f; color: #fff; border: none; padding: 14px; border-radius: 12px; font-size: 16px; font-weight: 700; cursor: pointer; margin-top: 12px; transition: all 0.2s; box-shadow: 0 4px 15px rgba(40, 199, 111, 0.3); }
-        .btn-submit:hover { background: #22b062; transform: translateY(-1px); }
-        .footer-note { font-size: 11px; color: #64748b; margin-top: 18px; text-align: center; display: flex; align-items: center; justify-content: center; gap: 6px; }
+        .portal-card { background: rgba(15, 25, 45, 0.95); border: 1px solid rgba(255,255,255,0.18); border-radius: 20px; width: 100%; max-width: 440px; padding: 28px; }
+        .test-badge { background: rgba(255, 159, 67, 0.15); border: 1px solid #ff9f43; color: #ff9f43; border-radius: 10px; padding: 10px 12px; font-size: 13px; font-weight: 700; margin-bottom: 18px; }
+        .amount-val { font-size: 34px; font-weight: 800; color: #28c76f; text-align: center; margin: 18px 0 22px; }
+        .btn-submit { width: 100%; background: #28c76f; color: #fff; border: none; padding: 14px; border-radius: 12px; font-size: 16px; font-weight: 700; cursor: pointer; }
+        .btn-submit:disabled { opacity: 0.6; cursor: wait; }
+        .status { font-size: 13px; color: #cbd5e1; margin-top: 14px; text-align: center; min-height: 18px; }
       </style>
     </head>
     <body>
       <div class="portal-card">
-        <div class="brand-badge"><i class="fas fa-shield-alt"></i> COMPASS POS Gateway Authorization</div>
-        <h2 style="font-size: 20px; margin-bottom: 16px; font-weight: 700; text-transform: capitalize;"><?php echo esc_html($gateway_title); ?></h2>
-        
-        <div class="amount-badge">
-          <div class="amount-title">Total Transaction Charge</div>
-          <div class="amount-val">$<?php echo number_format($amount, 2); ?></div>
-        </div>
-
-        <form id="portalForm" onsubmit="handleAuthorize(event)">
-          <div class="input-group">
-            <label>Cardholder / Account Name</label>
-            <input type="text" id="cardName" placeholder="John Doe" required value="Customer Authorization">
-          </div>
-
-          <div class="input-group">
-            <label>Card / Account Number</label>
-            <input type="text" id="cardNumber" placeholder="4532 •••• •••• 8890" value="4532 8901 2345 8890" maxlength="19" required>
-          </div>
-
-          <div class="row">
-            <div class="input-group" style="flex: 1;">
-              <label>Expires</label>
-              <input type="text" placeholder="12/28" value="12/28" maxlength="5" required>
-            </div>
-            <div class="input-group" style="flex: 1;">
-              <label>CVC / Code</label>
-              <input type="text" placeholder="123" value="382" maxlength="4" required>
-            </div>
-          </div>
-
-          <button type="submit" class="btn-submit">
-            <i class="fas fa-check-circle" style="margin-right: 6px;"></i> Authorize $<?php echo number_format($amount, 2); ?>
-          </button>
-        </form>
-
-        <div class="footer-note"><i class="fas fa-lock"></i> Encrypted 256-Bit TLS Checkout &bull; COMPASS Bazaar</div>
+        <div class="test-badge">TEST MODE: no payment processor is connected and no money moves.</div>
+        <h2 style="font-size: 20px; font-weight: 700;"><?php echo esc_html( $gateway_title ); ?></h2>
+        <div class="amount-val">$<?php echo esc_html( number_format( $amount, 2 ) ); ?></div>
+        <button type="button" class="btn-submit" id="approve">Approve test payment</button>
+        <div class="status" id="status"></div>
       </div>
-
       <script>
-        function handleAuthorize(e) {
-          e.preventDefault();
-          const btn = document.querySelector('.btn-submit');
-          btn.disabled = true;
-          btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Authorizing...';
+        (function () {
+          var ORIGIN = <?php echo wp_json_encode( $origin ); ?>;
+          var GATEWAY = <?php echo wp_json_encode( $gateway_id ); ?>;
+          var AMOUNT = <?php echo wp_json_encode( $amount ); ?>;
+          var AJAX = <?php echo wp_json_encode( admin_url( 'admin-ajax.php?action=bazaar_pos_authorize_test_payment' ) ); ?>;
+          var NONCE = <?php echo wp_json_encode( wp_create_nonce( 'wp_rest' ) ); ?>;
+          var button = document.getElementById('approve');
+          var status = document.getElementById('status');
 
-          setTimeout(() => {
-            const authId = 'AUTH-' + Math.random().toString(36).substr(2, 9).toUpperCase();
-            if (window.opener) {
-              window.opener.postMessage({
-                status: 'approved',
-                gatewayId: '<?php echo esc_js($gateway_id); ?>',
-                authorizationId: authId
-              }, '*');
-            }
-            alert('Payment Authorized Successfully!');
-            window.close();
-          }, 1000);
-        }
+          button.addEventListener('click', function () {
+            button.disabled = true;
+            status.textContent = 'Requesting authorization...';
+            var body = new URLSearchParams({ gateway: GATEWAY, amount: String(AMOUNT) });
+            fetch(AJAX, { method: 'POST', credentials: 'same-origin', headers: { 'X-WP-Nonce': NONCE }, body: body })
+              .then(function (response) { return response.json(); })
+              .then(function (reply) {
+                if (!reply || reply.success !== true || !reply.authorizationToken) {
+                  throw new Error((reply && reply.message) || 'Authorization was refused.');
+                }
+                if (!window.opener) {
+                  throw new Error('The register window is gone. Start the payment again.');
+                }
+                window.opener.postMessage({ status: 'approved', gatewayId: GATEWAY, authorizationToken: reply.authorizationToken }, ORIGIN);
+                status.textContent = 'Approved. You can close this window.';
+                setTimeout(function () { window.close(); }, 800);
+              })
+              .catch(function (error) {
+                button.disabled = false;
+                status.textContent = error.message;
+              });
+          });
+        })();
       </script>
     </body>
     </html>
     <?php
     exit;
   }
+
 }
 
 class Walker_Simple_String extends Walker {

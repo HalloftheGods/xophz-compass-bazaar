@@ -2,6 +2,15 @@
 
 All notable changes to the Compass Bazaar plugin. Newest first.
 
+## 2026-10-30
+
+### Security
+- **POS digital payments now need server-side authorization** (#6783). Before, `renderGatewayPortal` was registered on `wp_ajax_nopriv_bazaar_pos_gateway_portal` (open to logged-out visitors), its mock form posted `{status: 'approved'}` to `window.opener` with target origin `'*'`, the register accepted that message from any window, and `createPosOrder` marked the sale completed with no server check. Pay-by-link also recorded the sale as paid as soon as the link was "sent".
+- Removed the `nopriv` hook. The portal and the new `bazaar_pos_authorize_test_payment` action require `manage_woocommerce` or `edit_shop_orders` plus a valid `wp_rest` nonce.
+- The portal is test-only: enabled in `local`/`development` environments, otherwise off (override with `XOPHZ_BAZAAR_POS_TEST_PORTAL` or the `xophz_compass_bazaar_pos_test_portal` filter). It no longer shows a pre-filled card form, issues a one-time token (`Xophz_Compass_Bazaar_Pos_Authorization`) bound to cashier, gateway and amount, and posts it to the site origin only.
+- `createPosOrder` refuses a digital tender (anything that is not cash, a card terminal, a bank transfer or split) unless it carries a matching unused token; the refused order is deleted.
+- Tests: token rules in `tests/run-tests.php`; live checks in `tests/integration/pos-authorization.sh` with `tests/integration/call-handler.php`.
+
 ## 2026-10-29
 
 ### Added

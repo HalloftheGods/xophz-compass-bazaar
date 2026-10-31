@@ -10,9 +10,21 @@
 function _x( $text ) { return $text; }
 function _n_noop( $single, $plural ) { return [ 0 => $single, 1 => $plural, 'singular' => $single, 'plural' => $plural ]; }
 
+// In-memory transients and option stubs for the POS authorization tests.
+$GLOBALS['test_transients'] = [];
+$GLOBALS['test_environment'] = 'production';
+$GLOBALS['test_filters'] = [];
+function set_transient( $key, $value, $ttl ) { $GLOBALS['test_transients'][ $key ] = $value; return true; }
+function get_transient( $key ) { return $GLOBALS['test_transients'][ $key ] ?? false; }
+function delete_transient( $key ) { unset( $GLOBALS['test_transients'][ $key ] ); return true; }
+function wp_generate_password( $length ) { return bin2hex( random_bytes( (int) ( $length / 2 ) ) ); }
+function wp_get_environment_type() { return $GLOBALS['test_environment']; }
+function apply_filters( $hook, $value ) { return array_key_exists( $hook, $GLOBALS['test_filters'] ) ? $GLOBALS['test_filters'][ $hook ] : $value; }
+
 $root = dirname( __DIR__ );
 require_once $root . '/includes/class-xophz-compass-bazaar-sale-pricing.php';
 require_once $root . '/admin/class-xophz-compass-bazaar-admin-fulfillment.php';
+require_once $root . '/includes/class-xophz-compass-bazaar-pos-authorization.php';
 
 $failures = 0;
 $passes   = 0;
@@ -75,6 +87,38 @@ check( 'post status: registered for legacy storage', isset( $post_statuses['wc-r
 check( 'post status: listed in admin', $post_statuses['wc-ready-pickup']['show_in_admin_status_list'], true );
 check( 'post status key fits the 20-char limit', strlen( 'wc-ready-pickup' ) <= 20, true );
 check( 'paid statuses: added once', $F->addPaidStatus( $F->addPaidStatus( [ 'processing', 'completed' ] ) ), [ 'processing', 'completed', 'ready-pickup' ] );
+
+// POS digital payment authorization (#6783)
+$A = 'Xophz_Compass_Bazaar_Pos_Authorization';
+check( 'tender: cash needs no authorization', $A::requires_authorization( 'cash' ), false );
+check( 'tender: cod needs no authorization', $A::requires_authorization( 'cod' ), false );
+check( 'tender: card terminal by id', $A::requires_authorization( 'stripe' ), false );
+check( 'tender: card terminal by title', $A::requires_authorization( 'woocommerce_payments', 'Credit Card (WooPayments)' ), false );
+check( 'tender: bank transfer', $A::requires_authorization( 'bacs' ), false );
+check( 'tender: split', $A::requires_authorization( 'bazaar_split' ), false );
+check( 'tender: paypal is digital', $A::requires_authorization( 'ppcp-gateway', 'PayPal' ), true );
+check( 'tender: affirm is digital', $A::requires_authorization( 'affirm' ), true );
+
+$token = $A::issue( 7, 'paypal', '42.10', 1000 );
+check( 'token: long and random', strlen( $token ) >= 20 && $token !== $A::issue( 7, 'paypal', '42.10', 1000 ), true );
+check( 'token: only the hash is stored', in_array( $token, array_keys( $GLOBALS['test_transients'] ), true ), false );
+check( 'token: valid once', $A::consume( $token, 7, 'paypal', 42.1, 1001 ), '' );
+check( 'token: replay refused', $A::consume( $token, 7, 'paypal', 42.1, 1001 ), 'unknown or already used' );
+check( 'token: missing refused', $A::consume( '', 7, 'paypal', 42.1, 1001 ), 'missing' );
+check( 'token: forged refused', $A::consume( 'not-a-real-token-1234567890', 7, 'paypal', 42.1, 1001 ), 'unknown or already used' );
+check( 'token: other cashier refused', $A::consume( $A::issue( 7, 'paypal', 10, 1000 ), 8, 'paypal', 10, 1001 ), 'issued to another cashier' );
+check( 'token: other gateway refused', $A::consume( $A::issue( 7, 'paypal', 10, 1000 ), 7, 'affirm', 10, 1001 ), 'issued for another payment method' );
+check( 'token: other total refused', $A::consume( $A::issue( 7, 'paypal', 10, 1000 ), 7, 'paypal', 10.01, 1001 ), 'issued for a different total' );
+check( 'token: expired refused', $A::consume( $A::issue( 7, 'paypal', 10, 1000 ), 7, 'paypal', 10, 1000 + $A::TTL_SECONDS + 1 ), 'expired' );
+$spent = $A::issue( 7, 'paypal', 10, 1000 );
+$A::consume( $spent, 8, 'paypal', 10, 1001 );
+check( 'token: a refused attempt still spends it', $A::consume( $spent, 7, 'paypal', 10, 1001 ), 'unknown or already used' );
+
+check( 'test portal: off in production', $A::is_test_portal_enabled(), false );
+$GLOBALS['test_environment'] = 'local';
+check( 'test portal: on in local', $A::is_test_portal_enabled(), true );
+$GLOBALS['test_filters']['xophz_compass_bazaar_pos_test_portal'] = false;
+check( 'test portal: filter can turn it off', $A::is_test_portal_enabled(), false );
 
 echo "$passes passed, $failures failed\n";
 exit( $failures > 0 ? 1 : 0 );
