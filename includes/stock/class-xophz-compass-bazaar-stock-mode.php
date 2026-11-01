@@ -16,7 +16,7 @@
  *   history and in the PHP error log.
  * - The audit is $opts['audit'] when given (a callable returning an int, or
  *   an array whose count is the number of violations), else Stock_Audit::run
- *   when that class exists (WP14), else drift_violations().
+ *   when that class exists (WP13), else drift_violations().
  *
  * Not guaranteed: set() does not lock; two concurrent set() calls both pass
  * their checks and the later write wins.

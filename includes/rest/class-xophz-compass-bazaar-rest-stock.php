@@ -139,6 +139,9 @@ class Xophz_Compass_Bazaar_Rest_Stock {
     if ( Xophz_Compass_Bazaar_Stock_Mode::LEDGER !== $mode ) {
       return self::adjust_legacy( $in, $info, $mode );
     }
+    if ( $in['location_id'] > 0 && ! isset( Xophz_Compass_Bazaar_Stock_Locations::inventory_entries( (int) $info['stock_product_id'] )[ $in['location_id'] ] ) ) {
+      throw new Xophz_Compass_Bazaar_Core_Http_Error( 'unsupported_field', 'location_id must be 0 or one of the product\'s multi-inventory locations.', 422 );
+    }
     $ctx  = Xophz_Compass_Bazaar_Security_Guard::context();
     $meta = new Xophz_Compass_Bazaar_Stock_Meta(
       [

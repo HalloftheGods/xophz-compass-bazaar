@@ -253,6 +253,10 @@ switch ( $env( 'FIX_ACTION' ) ) {
     $history = Xophz_Compass_Bazaar_Stock_Mode::history();
     $last    = end( $history );
     $say( 'drift.forced.history_reason', $last['reason'] ?? '' );
+    $r = $adjust( [ 'client_key' => "$run-ph", 'product_id' => $p['P1'], 'location_id' => 987654321, 'operation' => 'add', 'quantity' => 3 ] );
+    $say( 'ledger.phantom.status', $r['status'] );
+    $say( 'ledger.phantom.code', $r['data']['code'] ?? '' );
+    $say( 'ledger.phantom.rows', (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . $tbl( 'stock_balances' ) . ' WHERE stock_product_id = ' . (int) $p['P1'] . ' AND location_id = 987654321' ) );
     $rest( 'POST', '/bazaar/v1/stock/mode', [ 'mode' => 'shadow' ] );
 
     $r = $adjust( [ 'client_key' => "$run-sh", 'product_id' => $p['P1'], 'operation' => 'add', 'quantity' => 2 ] );
