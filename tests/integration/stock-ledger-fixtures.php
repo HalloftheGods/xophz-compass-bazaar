@@ -16,10 +16,14 @@
  *   and initializes P2 and P3 for the parallel checks.
  * - seq_drift P1..P5, W1, ADMIN, RUN: the parallel results, then drift
  *   refusal and shadow mode.
- * - cleanup PIDS, WIDS, SAVED: deletes the ledger and outbox rows of those
- *   products' batches and the products' own outbox rows (drift events),
- *   trashes the posts, puts the mode options back and prints
- *   cleanup.rows_left (0 when none of those rows is left).
+ * - cleanup RUN, PIDS, WIDS, SAVED: deletes the ledger and outbox rows of
+ *   those products' batches and the products' own outbox rows (drift
+ *   events), moves the posts to the trash and then force-deletes them,
+ *   puts the mode options back and prints cleanup.rows_left (the rows the
+ *   delete targeted, counted again) plus checks that do not reuse those
+ *   predicates: stock batches and outbox payloads that mention RUN,
+ *   outbox payloads that name a fixture product under any aggregate type,
+ *   and the number of violations the site-wide Stock_Audit reports.
  *
  * Only touches the ids it is given. Ledger rows of other products are left as
  * they are. Nonce checks are not exercised (rest_do_request skips them).
@@ -292,8 +296,10 @@ switch ( $env( 'FIX_ACTION' ) ) {
       $wpdb->query( 'DELETE FROM ' . $tbl( 'stock_balances' ) . " WHERE stock_product_id IN ($in)" );
     }
     $trashed = 0;
+    $deleted = 0;
     foreach ( array_merge( $pids, array_filter( array_map( 'intval', explode( ',', $env( 'WIDS' ) ) ) ) ) as $id ) {
       $trashed += wp_trash_post( $id ) ? 1 : 0;
+      $deleted += wp_delete_post( $id, true ) ? 1 : 0;
     }
     $saved = json_decode( $env( 'SAVED' ), true );
     if ( is_array( $saved ) && array_key_exists( 'mode', $saved ) ) {
@@ -307,6 +313,7 @@ switch ( $env( 'FIX_ACTION' ) ) {
     }
     $say( 'cleanup.batches', count( $batch_ids ) );
     $say( 'cleanup.trashed', $trashed );
+    $say( 'cleanup.deleted', $deleted );
     $left = 0;
     if ( $pids ) {
       $left += (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . $tbl( 'stock_movements' ) . " WHERE stock_product_id IN ($in)" );
@@ -318,6 +325,17 @@ switch ( $env( 'FIX_ACTION' ) ) {
       $left += (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . $tbl( 'events' ) . " WHERE aggregate_type = 'stock_batch' AND aggregate_id IN ($bin)" );
     }
     $say( 'cleanup.rows_left', $left );
+    // Checks that do not reuse the delete predicates above.
+    $run_like = '%' . $wpdb->esc_like( $run ) . '%';
+    $say( 'cleanup.run_batches', (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . $tbl( 'stock_batches' ) . ' WHERE idem_key LIKE %s', $run_like ) ) );
+    $say( 'cleanup.run_events', (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . $tbl( 'events' ) . ' WHERE payload LIKE %s', $run_like ) ) );
+    $pid_events = 0;
+    foreach ( $pids as $pid ) {
+      $pid_events += (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . $tbl( 'events' ) . ' WHERE payload REGEXP %s', '"(stock_)?product_id":"?' . $pid . '[^0-9]' ) );
+    }
+    $say( 'cleanup.pid_events', $pid_events );
+    $audit = Xophz_Compass_Bazaar_Stock_Audit::run();
+    $say( 'cleanup.audit_violations', count( $audit['violations'] ) );
     $say( 'cleanup.mode', get_option( 'bazaar_ledger_mode', '__absent__' ) );
     break;
 

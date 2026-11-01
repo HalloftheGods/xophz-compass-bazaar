@@ -17,8 +17,9 @@
 # - ledger mode is refused while there is drift, unless forced with a reason;
 # - shadow mode adjusts WooCommerce stock outside the ledger, and the observer
 #   then records the change as an `adjust` batch, so the balance follows;
-# - cleanup leaves none of the fixtures' ledger or outbox rows behind, so the
-#   script can run again on the same site.
+# - cleanup deletes the fixtures' ledger and outbox rows and force-deletes
+#   their posts; then nothing mentions the run or the fixture products and the
+#   site-wide audit reports no violation, so the script can run again.
 #
 # The sequential checks run in-process (stock-ledger-fixtures.php) because
 # every WordPress boot in the Docker stack takes seconds; the parallel checks
@@ -177,6 +178,11 @@ expect 'shadow: a warehouse adjustment is 422 unsupported_field' "$out" 'shadow.
 out="$(run_cleanup)"
 CLEANED=1
 expect 'cleanup: trashes the 5 products and 2 warehouses' "$out" 'cleanup.trashed=7'
-expect 'cleanup: no ledger or outbox rows of the fixtures left' "$out" 'cleanup.rows_left=0'
+expect 'cleanup: force-deletes the 5 products and 2 warehouses' "$out" 'cleanup.deleted=7'
+expect 'cleanup: no row the cleanup targeted is left' "$out" 'cleanup.rows_left=0'
+expect 'cleanup: no stock batch carries the run key' "$out" 'cleanup.run_batches=0'
+expect 'cleanup: no outbox payload mentions the run' "$out" 'cleanup.run_events=0'
+expect 'cleanup: no outbox payload names a fixture product' "$out" 'cleanup.pid_events=0'
+expect 'cleanup: the site-wide audit reports no violation' "$out" 'cleanup.audit_violations=0'
 
 bz_finish
