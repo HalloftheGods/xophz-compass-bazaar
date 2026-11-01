@@ -57,17 +57,6 @@ class Xophz_Compass_Bazaar_Admin {
   * @since    1.0.0
   */
   public function enqueue_styles() {
-    /**
-    * This function is provided for demonstration purposes only.
-    *
-    * An instance of this class should be passed to the run() function
-    * defined in Xophz_Compass_Bazaar_Loader as all of the hooks are defined
-    * in that particular class.
-    *
-    * The Xophz_Compass_Bazaar_Loader will then create the relationship
-    * between the defined hooks and the functions defined in this
-    * class.
-    */
     wp_enqueue_style( $this->plugin_name, plugin_dir_url( __FILE__ ) . 'css/xophz-compass-bazaar-admin.css', array(), $this->version, 'all' );
   }
 
@@ -77,18 +66,6 @@ class Xophz_Compass_Bazaar_Admin {
   * @since    1.0.0
   */
   public function enqueue_scripts() {
-    /**
-    * This function is provided for demonstration purposes only.
-    *
-    * An instance of this class should be passed to the run() function
-    * defined in Xophz_Compass_Bazaar_Loader as all of the hooks are defined
-    * in that particular class.
-    *
-    * The Xophz_Compass_Bazaar_Loader will then create the relationship
-    * between the defined hooks and the functions defined in this
-    * class.
-    */
-
     wp_enqueue_script( $this->plugin_name, plugin_dir_url( __FILE__ ) . 'js/xophz-compass-bazaar-admin.js', array( 'jquery' ), $this->version, false );
   }
 
@@ -181,19 +158,9 @@ class Xophz_Compass_Bazaar_Admin {
         $product->set_sku(sanitize_text_field($args->sku));
       }
       
-      if (isset($args->manage_stock) && $args->manage_stock) {
-        $product->set_manage_stock(true);
-        if (isset($args->stock_quantity)) {
-          $product->set_stock_quantity(intval($args->stock_quantity));
-        }
-      } else {
-        $product->set_manage_stock(false);
-      }
+      // Stock fields need bazaar_manage_stock; the quantity is written after the save, through the ledger in ledger mode.
+      $stock_quantity = Xophz_Compass_Bazaar_Admin_Product_Stock::apply_form($product, $args);
 
-      if (isset($args->stock_status)) {
-        $product->set_stock_status(sanitize_text_field($args->stock_status));
-      }
-      
       if (isset($args->category_ids)) {
         $cat_ids = is_string($args->category_ids) ? json_decode($args->category_ids, true) : $args->category_ids;
         if (is_array($cat_ids)) {
@@ -237,159 +204,30 @@ class Xophz_Compass_Bazaar_Admin {
       
       $product_id = $product->save();
 
+      if ($product_id && null !== $stock_quantity) {
+        Xophz_Compass_Bazaar_Admin_Product_Stock::set_quantity(
+          $product_id,
+          $stock_quantity,
+          'product_form',
+          Xophz_Compass_Bazaar_Admin_Product_Stock::adjust_key(Xophz_Compass_Bazaar_Admin_Product_Stock::client_uuid($args))
+        );
+      }
+
       if ($product_id) {
         $products = Xophz_Compass_Bazaar_Admin::getProductsDataByIds([$product_id]);
-        Xophz_Compass::output_json([
-          'success' => true,
-          'product' => isset($products[0]) ? $products[0] : null
-        ]);
+        $response = ['success' => true, 'product' => isset($products[0]) ? $products[0] : null];
       } else {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Failed to save product']);
+        $response = ['success' => false, 'message' => 'Failed to save product'];
       }
     } catch (\Throwable $e) {
-      Xophz_Compass::output_json([
-        'success' => false,
-        'message' => $e->getMessage()
-      ]);
+      $response = ['success' => false, 'message' => $e->getMessage()];
     }
+    Xophz_Compass::output_json($response);
   }
 
+  /** bazaar_import_products_csv: see Xophz_Compass_Bazaar_Admin_Product_Import. */
   public function importProductsCsv() {
-    try {
-      if (!current_user_can('manage_woocommerce') && !current_user_can('edit_products')) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Permission denied.']);
-        return;
-      }
-
-      $args = Xophz_Compass::get_input_json();
-      $products = isset($args->products) ? $args->products : [];
-
-      if (is_string($products)) {
-        $products = json_decode($products, true);
-      }
-
-      if (empty($products) || !is_array($products)) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'No product rows provided.']);
-        return;
-      }
-
-      $created_count = 0;
-      $updated_count = 0;
-      $skipped_count = 0;
-      $errors = [];
-
-      foreach ($products as $index => $pData) {
-        $pObj = is_object($pData) ? $pData : (object) $pData;
-        $title = isset($pObj->title) ? trim(sanitize_text_field($pObj->title)) : '';
-        if (empty($title)) {
-          $skipped_count++;
-          $errors[] = "Row #" . ($index + 1) . ": Skipped due to missing title.";
-          continue;
-        }
-
-        $sku = isset($pObj->sku) ? trim(sanitize_text_field($pObj->sku)) : '';
-        $existing_id = 0;
-
-        if ($sku) {
-          $existing_id = wc_get_product_id_by_sku($sku);
-        }
-
-        if (!$existing_id) {
-          $page = get_page_by_title($title, OBJECT, 'product');
-          if ($page) {
-            $existing_id = $page->ID;
-          }
-        }
-
-        $product = $existing_id > 0 ? wc_get_product($existing_id) : new WC_Product_Simple();
-        if (!$product) {
-          $skipped_count++;
-          $errors[] = "Row #" . ($index + 1) . ": Failed to load product instance.";
-          continue;
-        }
-
-        $is_new = ($existing_id === 0);
-
-        $product->set_name($title);
-        if ($sku) {
-          $product->set_sku($sku);
-        }
-
-        if (isset($pObj->regular_price) && $pObj->regular_price !== '') {
-          $product->set_regular_price(wc_format_decimal($pObj->regular_price));
-        }
-
-        if (isset($pObj->sale_price) && $pObj->sale_price !== '') {
-          $product->set_sale_price(wc_format_decimal($pObj->sale_price));
-        }
-
-        if (isset($pObj->description)) {
-          $product->set_description(wp_kses_post($pObj->description));
-        }
-
-        if (isset($pObj->short_description)) {
-          $product->set_short_description(wp_kses_post($pObj->short_description));
-        }
-
-        if (isset($pObj->stock_quantity) && $pObj->stock_quantity !== '') {
-          $product->set_manage_stock(true);
-          $product->set_stock_quantity(intval($pObj->stock_quantity));
-        }
-
-        if (isset($pObj->stock_status) && !empty($pObj->stock_status)) {
-          $status = strtolower(trim($pObj->stock_status));
-          if (in_array($status, ['instock', 'outofstock', 'onbackorder'])) {
-            $product->set_stock_status($status);
-          }
-        }
-
-        if (isset($pObj->categories) && !empty($pObj->categories)) {
-          $cat_names = array_map('trim', explode(',', $pObj->categories));
-          $cat_ids = [];
-          foreach ($cat_names as $cname) {
-            if (empty($cname)) continue;
-            $term = get_term_by('name', $cname, 'product_cat');
-            if (!$term) {
-              $term_res = wp_insert_term($cname, 'product_cat');
-              if (!is_wp_error($term_res) && isset($term_res['term_id'])) {
-                $cat_ids[] = intval($term_res['term_id']);
-              }
-            } else {
-              $cat_ids[] = intval($term->term_id);
-            }
-          }
-          if (!empty($cat_ids)) {
-            $product->set_category_ids($cat_ids);
-          }
-        }
-
-        if ($is_new) {
-          $product->set_status('publish');
-        }
-
-        $saved_id = $product->save();
-        if ($saved_id) {
-          if ($is_new) {
-            $created_count++;
-          } else {
-            $updated_count++;
-          }
-        } else {
-          $skipped_count++;
-          $errors[] = "Row #" . ($index + 1) . " ({$title}): Failed to save product.";
-        }
-      }
-
-      Xophz_Compass::output_json([
-        'success' => true,
-        'created_count' => $created_count,
-        'updated_count' => $updated_count,
-        'skipped_count' => $skipped_count,
-        'errors' => $errors
-      ]);
-    } catch (\Throwable $e) {
-      Xophz_Compass::output_json(['success' => false, 'message' => $e->getMessage()]);
-    }
+    (new Xophz_Compass_Bazaar_Admin_Product_Import())->import();
   }
 
   public function lookupBarcode() {
@@ -482,45 +320,9 @@ class Xophz_Compass_Bazaar_Admin {
   }
 
 
+  /** update_product_stock: see Xophz_Compass_Bazaar_Admin_Product_Stock. */
   public function updateProductStock(){
-    Xophz_Compass_Security::enforce_spa_ajax( 'manage_woocommerce', 'edit_products' );
-
-    $args = Xophz_Compass::get_input_json();
-    $product_id = isset($args->product_id) ? intval($args->product_id) : 0;
-    $quantity = isset($args->quantity) ? intval($args->quantity) : 0;
-    $action = isset($args->action) ? $args->action : 'set'; // 'set', 'add', 'subtract'
-
-    if(!$product_id) {
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Invalid product ID']);
-        return;
-    }
-
-    $product = wc_get_product($product_id);
-    if(!$product || !$product->managing_stock()){
-        Xophz_Compass::output_json(['success' => false, 'message' => 'Product not found or not managing stock']);
-        return;
-    }
-
-    $current_stock = $product->get_stock_quantity();
-    $new_stock = $current_stock;
-
-    if ($action === 'set') {
-        $new_stock = $quantity;
-    } else if ($action === 'add') {
-        $new_stock = $current_stock + $quantity;
-    } else if ($action === 'subtract') {
-        $new_stock = $current_stock - $quantity;
-    }
-
-    wc_update_product_stock($product, $new_stock, 'set');
-    
-    // Get updated product data
-    $updated_products = Xophz_Compass_Bazaar_Admin::getProductsDataByIds([$product_id]);
-
-    Xophz_Compass::output_json([
-        'success' => true,
-        'product' => isset($updated_products[0]) ? $updated_products[0] : null
-    ]);
+    (new Xophz_Compass_Bazaar_Admin_Product_Stock())->update();
   }
 
   public function getProductsStats(){
