@@ -39,7 +39,7 @@ class Xophz_Compass_Bazaar_Payments_Provider_Test_Portal implements Xophz_Compas
     if ( ! $this->available() ) {
       return $this->unavailable();
     }
-    $reason = Xophz_Compass_Bazaar_Pos_Authorization::peek( $t->authorization_token, $i->operator_user_id, $t->method_id, $t->amount_minor / 100 );
+    $reason = Xophz_Compass_Bazaar_Pos_Authorization::peek( $t->authorization_token, $i->operator_user_id, $t->method_id, Xophz_Compass_Bazaar_Core_Money::from_minor( $t->amount_minor ) );
     return '' === $reason ? Xophz_Compass_Bazaar_Payments_Result::ok() : $this->not_authorized( $reason, $i );
   }
 
@@ -48,7 +48,7 @@ class Xophz_Compass_Bazaar_Payments_Provider_Test_Portal implements Xophz_Compas
     if ( ! $this->available() ) {
       return $this->unavailable();
     }
-    $reason = Xophz_Compass_Bazaar_Pos_Authorization::consume( $t->authorization_token, $i->operator_user_id, $t->method_id, $t->amount_minor / 100 );
+    $reason = Xophz_Compass_Bazaar_Pos_Authorization::consume( $t->authorization_token, $i->operator_user_id, $t->method_id, Xophz_Compass_Bazaar_Core_Money::from_minor( $t->amount_minor ) );
     if ( '' !== $reason ) {
       return $this->not_authorized( $reason, $i );
     }

@@ -1,5 +1,9 @@
 <?php
 
+if ( ! class_exists( 'Xophz_Compass_Bazaar_Core_Money' ) ) {
+  require_once __DIR__ . '/core/class-xophz-compass-bazaar-core-money.php';
+}
+
 /**
  * Server-side authorization for POS digital payments.
  *
@@ -63,8 +67,17 @@ class Xophz_Compass_Bazaar_Pos_Authorization {
     return true;
   }
 
-  public static function to_cents( $amount ): int {
-    return (int) round( (float) $amount * 100 );
+  /**
+   * Major-unit amount to the store's minor units (price decimals, or an
+   * explicit count). A value that is not a plain number maps to PHP_INT_MIN,
+   * which matches no stored token.
+   */
+  public static function to_cents( $amount, ?int $decimals = null ): int {
+    try {
+      return Xophz_Compass_Bazaar_Core_Money::to_minor( $amount, $decimals );
+    } catch ( InvalidArgumentException $e ) {
+      return PHP_INT_MIN;
+    }
   }
 
   /**
@@ -109,7 +122,7 @@ class Xophz_Compass_Bazaar_Pos_Authorization {
   }
 
   /** Pure comparison used by consume() and peek(). */
-  public static function check( $record, int $user_id, string $gateway, $amount, int $now ): string {
+  public static function check( $record, int $user_id, string $gateway, $amount, int $now, ?int $decimals = null ): string {
     if ( ! is_array( $record ) ) {
       return 'unknown or already used';
     }
@@ -122,17 +135,17 @@ class Xophz_Compass_Bazaar_Pos_Authorization {
     if ( (string) ( $record['gateway'] ?? '' ) !== $gateway ) {
       return 'issued for another payment method';
     }
-    if ( (int) ( $record['cents'] ?? -1 ) !== self::to_cents( $amount ) ) {
+    if ( (int) ( $record['cents'] ?? -1 ) !== self::to_cents( $amount, $decimals ) ) {
       return 'issued for a different total';
     }
     return '';
   }
 
-  public static function record( int $user_id, string $gateway, $amount, int $now ): array {
+  public static function record( int $user_id, string $gateway, $amount, int $now, ?int $decimals = null ): array {
     return [
       'user_id' => $user_id,
       'gateway' => $gateway,
-      'cents'   => self::to_cents( $amount ),
+      'cents'   => self::to_cents( $amount, $decimals ),
       'expires' => $now + self::TTL_SECONDS,
     ];
   }
