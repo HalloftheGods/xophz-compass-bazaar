@@ -38,7 +38,9 @@ expect() {
 
 PRODUCT_ID="$(wp_eval '$p = new WC_Product_Simple(); $p->set_name("POS auth integration check"); $p->set_status("private"); $p->set_regular_price("12.50"); $p->save(); echo $p->get_id();' | tail -1)"
 ITEMS="[{\"product_id\":$PRODUCT_ID,\"quantity\":2}]"
-ORDERS_BEFORE="$(wp_eval 'echo count(wc_get_orders(["limit" => -1, "return" => "ids", "created_via" => "bazaar_pos"]));' | tail -1)"
+# Only orders containing this run's private product count, so concurrent POS sales elsewhere cannot skew the check.
+ORDER_IDS_PHP='foreach (wc_get_orders(["limit" => -1, "created_via" => "bazaar_pos"]) as $o) { foreach ($o->get_items() as $it) { if ((int) $it->get_product_id() === '"$PRODUCT_ID"') { $ids[] = $o->get_id(); break; } } }'
+ORDERS_BEFORE=0
 
 # Portal access
 out="$(call renderGatewayPortal '{"gateway":"paypal","amount":"25.00"}' -e CALL_LOGGED_OUT=1)"
@@ -81,11 +83,11 @@ expect 'checkout: the same token cannot be reused' "$out" 'Payment not authorize
 out="$(call createPosOrder "{\"items\":$ITEMS,\"paymentMethod\":\"cash\"}")"
 expect 'checkout: cash still needs no token' "$out" '"success":true'
 
-ORDERS_AFTER="$(wp_eval 'echo count(wc_get_orders(["limit" => -1, "return" => "ids", "created_via" => "bazaar_pos"]));' | tail -1)"
+ORDERS_AFTER="$(wp_eval "\$ids = []; $ORDER_IDS_PHP echo count(\$ids);" | tail -1)"
 if [ "$((ORDERS_AFTER - ORDERS_BEFORE))" -eq 2 ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL checkout: refused attempts left orders behind ($ORDERS_BEFORE -> $ORDERS_AFTER, expected +2)"; fi
 
 # Clean up: trash the two orders this run created and the product.
-wp_eval "foreach (wc_get_orders([\"limit\" => -1, \"created_via\" => \"bazaar_pos\", \"orderby\" => \"ID\", \"order\" => \"DESC\"]) as \$i => \$o) { if (\$i < 2) \$o->delete(false); } wc_get_product($PRODUCT_ID)->delete(false);" >/dev/null
+wp_eval "\$ids = []; $ORDER_IDS_PHP foreach (\$ids as \$id) { wc_get_order(\$id)->delete(false); } wc_get_product($PRODUCT_ID)->delete(false);" >/dev/null
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
