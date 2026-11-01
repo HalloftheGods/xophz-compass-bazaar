@@ -107,11 +107,14 @@ expect_equal 'shift summary: spec 14.1 keys, sell-only user narrowed to self' "$
 expect_equal 'shift summary: admin sees the sales' "$(check_line shift_admin)" '200 counted'
 
 KEYS="$(wp_eval 'echo implode(",", (array) get_option("bazaar_checkout_v2_test_keys", []));')"
+ORDER_IDS="$(wp_eval 'global $wpdb; $keys = (array) get_option("bazaar_checkout_v2_test_keys", []); $ids = []; foreach ($keys as $k) { $ids = array_merge($ids, $wpdb->get_col($wpdb->prepare("SELECT order_id FROM {$wpdb->prefix}bazaar_checkouts WHERE client_key = %s AND order_id IS NOT NULL", $k))); } echo implode(",", array_map("intval", $ids));')"
 teardown
 trap - EXIT
 out="$(wp_eval 'global $wpdb; $keys = array_filter(explode(",", "'"$KEYS"'")); $in = $keys ? "\"" . implode("\",\"", array_map("esc_sql", $keys)) . "\"" : "\"\""; echo "checkouts=" . (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->prefix}bazaar_checkouts WHERE client_key IN ($in)"); echo " products=" . (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = \"product\" AND post_title LIKE \"Bazaar checkout-v2 %\""); echo in_array("bazaar-co-test", WC_Tax::get_tax_class_slugs(), true) ? " class-left" : " class-gone";')"
 expect_equal 'teardown: checkouts, products and tax class are gone' "$out" 'checkouts=0 products=0 class-gone'
 out="$(wp_eval 'global $wpdb; echo (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->users} WHERE user_email LIKE \"bz-co-new-%@example.test\" OR user_login LIKE \"bz-co-%\"");')"
 expect_equal 'teardown: test users are gone' "$out" '0'
+out="$(wp_eval '$left = 0; foreach (array_filter(explode(",", "'"$ORDER_IDS"'")) as $id) { $left += wc_get_order((int) $id) ? 1 : 0; } echo "orders-left=$left";')"
+expect_equal 'teardown: every order this run created is deleted, not left in the trash' "$out" 'orders-left=0'
 
 bz_finish

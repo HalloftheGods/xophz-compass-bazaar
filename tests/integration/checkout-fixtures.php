@@ -98,8 +98,20 @@ if ( ! function_exists( 'bz_co_rest' ) ) {
     return [ [ 'method_id' => 'cash', 'amount_minor' => $total, 'tendered_minor' => $total + $extra ] ];
   }
 
+  /** Orders that this run's checkouts created (by _bazaar_checkout_id), so other scripts' POS orders never count. */
   function bz_co_orders(): int {
-    return count( wc_get_orders( [ 'limit' => -1, 'return' => 'ids', 'created_via' => 'bazaar_pos', 'status' => array_keys( wc_get_order_statuses() ) ] ) );
+    global $wpdb;
+    $keys = array_values( (array) get_option( 'bazaar_checkout_v2_test_keys', [] ) );
+    $ids  = $keys ? $wpdb->get_col( $wpdb->prepare( 'SELECT id FROM ' . Xophz_Compass_Bazaar_Core_Db::table( 'checkouts' ) . ' WHERE client_key IN (' . implode( ',', array_fill( 0, count( $keys ), '%s' ) ) . ')', $keys ) ) : [];
+    if ( ! $ids ) {
+      return 0;
+    }
+    return count( wc_get_orders( [
+      'limit'      => -1,
+      'return'     => 'ids',
+      'status'     => array_keys( wc_get_order_statuses() ),
+      'meta_query' => [ [ 'key' => '_bazaar_checkout_id', 'value' => array_map( 'strval', $ids ), 'compare' => 'IN' ] ],
+    ] ) );
   }
 
   function bz_co_row( string $key, int $user = 0 ): ?array {
@@ -203,7 +215,11 @@ if ( ! function_exists( 'bz_co_rest' ) ) {
         }
         if ( $order ) {
           $order->delete( false );
-          $order->delete( true );
+          // delete() zeroes the object's id, so the forced delete needs a fresh copy.
+          $trashed = wc_get_order( (int) $row->order_id );
+          if ( $trashed ) {
+            $trashed->delete( true );
+          }
         }
         $wpdb->query( $wpdb->prepare( 'DELETE FROM ' . $t( 'payments' ) . ' WHERE checkout_id = %d', (int) $row->id ) );
         $wpdb->query( $wpdb->prepare( 'DELETE FROM ' . $t( 'events' ) . " WHERE aggregate_type = 'checkout' AND aggregate_id = %d", (int) $row->id ) );
