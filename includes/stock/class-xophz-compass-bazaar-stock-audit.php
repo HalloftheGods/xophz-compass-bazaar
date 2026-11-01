@@ -15,17 +15,23 @@
  * - order_line_net (I3): an order item whose net outflow is below 0 or
  *   above its quantity;
  * - duplicate_stock_rows: a post with more than one `_stock` row;
- * - negative_balance: a balance below 0 for a product that does not allow
- *   backorders (with backorders it is a notice, negative_balance_backorder);
+ * - negative_balance: a balance below 0 for a product that manages stock
+ *   and does not allow backorders (with backorders it is a notice,
+ *   negative_balance_backorder);
  * - order_target: a ledger-owned order whose net outflow differs from its
- *   target (committed for paid statuses, on-hold and refunded, and for
+ *   target (target()): committed for paid statuses and on-hold, and for
  *   pending while its checkout row is committed; released for cancelled,
- *   failed and other pending orders); order_not_ledger_owned: an order with
- *   order movements that is missing or not ledger-owned.
+ *   failed and other pending orders; for refunded, what the order's last
+ *   sync batch did, because the lifecycle never syncs on refunded (finding
+ *   16 of #6983); order_not_ledger_owned: an order with order movements
+ *   that is missing or not ledger-owned.
  * Notices (reported, never counted as violations): cancelled_with_payments
  * (an order that is cancelled while it has capture rows in a counted
- * status), negative_balance_backorder, order_status_unchecked (a ledger-owned
- * order in a status this audit has no target for).
+ * status), negative_balance_backorder, negative_balance_untracked (a
+ * negative balance of a product that was deleted or no longer manages
+ * stock, which no ledger write can reach; finding 17 of #6983),
+ * order_status_unchecked (a ledger-owned order in a status this audit has
+ * no target for).
  *
  * Guarantees: it only reads; it repairs nothing.
  * Not guaranteed: a consistent snapshot. It takes no locks, so a write that
@@ -182,12 +188,27 @@ final class Xophz_Compass_Bazaar_Stock_Audit {
   private static function negative_balances(): array {
     $out = [];
     $sql = 'SELECT stock_product_id, location_id, on_hand FROM ' . self::t( 'stock_balances' ) . ' WHERE on_hand <= %f ORDER BY stock_product_id, location_id';
+    $notes = [ 'negative_balance' => '', 'negative_balance_backorder' => ' (backorders allowed)', 'negative_balance_untracked' => ' (the product was deleted or no longer manages stock)' ];
     foreach ( Xophz_Compass_Bazaar_Core_Db::get_results( $sql, [ -self::EPSILON ] ) as $row ) {
-      $info    = Xophz_Compass_Bazaar_Stock_Factory::port()->product_info( (int) $row->stock_product_id );
-      $backord = ! empty( $info['backorders_allowed'] );
-      $out[]   = self::entry( $backord ? 'negative_balance_backorder' : 'negative_balance', sprintf( 'Product %d location %d: on_hand %s%s.', $row->stock_product_id, $row->location_id, self::num( $row->on_hand ), $backord ? ' (backorders allowed)' : '' ), [ 'stock_product_id' => (int) $row->stock_product_id, 'location_id' => (int) $row->location_id, 'on_hand' => self::num( $row->on_hand ) ], $backord );
+      $type  = self::negative_type( Xophz_Compass_Bazaar_Stock_Factory::port()->product_info( (int) $row->stock_product_id ) );
+      $out[] = self::entry( $type, sprintf( 'Product %d location %d: on_hand %s%s.', $row->stock_product_id, $row->location_id, self::num( $row->on_hand ), $notes[ $type ] ), [ 'stock_product_id' => (int) $row->stock_product_id, 'location_id' => (int) $row->location_id, 'on_hand' => self::num( $row->on_hand ) ], 'negative_balance' !== $type );
     }
     return $out;
+  }
+
+  /**
+   * The entry type of a negative balance, from the product as it is now:
+   * negative_balance_untracked (a notice) when the product is gone or no
+   * longer manages stock, since no ledger write reaches it any more (like
+   * drift_violations, which skips deleted products);
+   * negative_balance_backorder (a notice) when it allows backorders; else
+   * negative_balance.
+   */
+  public static function negative_type( ?array $info ): string {
+    if ( ! $info || empty( $info['manages_stock'] ) ) {
+      return 'negative_balance_untracked';
+    }
+    return empty( $info['backorders_allowed'] ) ? 'negative_balance' : 'negative_balance_backorder';
   }
 
   /** Ledger-owned orders against Stock_Order_Math targets. */
@@ -214,7 +235,8 @@ final class Xophz_Compass_Bazaar_Stock_Audit {
         }
         continue;
       }
-      $target = self::target( (string) $order->get_status(), $committed, $checkouts[ $id ] ?? '' );
+      $status = (string) $order->get_status();
+      $target = self::target( $status, $committed, $checkouts[ $id ] ?? '', 'refunded' === $status ? self::last_sync( $id ) : null );
       if ( null === $target ) {
         $out[] = self::entry( 'order_status_unchecked', sprintf( 'Order %d is %s; the audit has no stock target for that status.', $id, $order->get_status() ), [ 'order_id' => $id, 'status' => (string) $order->get_status() ], true );
         continue;
@@ -227,10 +249,21 @@ final class Xophz_Compass_Bazaar_Stock_Audit {
     return $out;
   }
 
-  /** True (committed), false (released) or null (no target for the status). */
-  private static function target( string $status, array $committed, string $checkout_state ): ?bool {
-    if ( in_array( $status, $committed, true ) || 'refunded' === $status ) {
+  /**
+   * True (committed), false (released) or null (no target for the status),
+   * by the rule Stock_Order_Lifecycle::action_for() follows. A refunded
+   * order gets no sync (refunded is not a committed status), so its stock
+   * stays where the last sync left it: $last_sync, the committed flag of
+   * the order's newest sync batch (null, none: released, with no outflow).
+   * A completed order refunded keeps its committed target (a restock is
+   * subtracted from it); one cancelled and then refunded keeps released.
+   */
+  public static function target( string $status, array $committed, string $checkout_state, ?bool $last_sync = null ): ?bool {
+    if ( in_array( $status, $committed, true ) ) {
       return true;
+    }
+    if ( 'refunded' === $status ) {
+      return (bool) $last_sync;
     }
     if ( 'pending' === $status ) {
       return 'committed' === $checkout_state;
@@ -239,6 +272,13 @@ final class Xophz_Compass_Bazaar_Stock_Audit {
       return false;
     }
     return null;
+  }
+
+  /** The committed flag of the order's newest sync batch (key order:{id}:sync:{n}:{c|r}), null when it has none. */
+  private static function last_sync( int $order_id ): ?bool {
+    global $wpdb;
+    $key = Xophz_Compass_Bazaar_Core_Db::get_var( 'SELECT idem_key FROM ' . self::t( 'stock_batches' ) . ' WHERE idem_key LIKE %s ORDER BY id DESC LIMIT 1', [ $wpdb->esc_like( 'order:' . $order_id . ':sync:' ) . '%' ] );
+    return null === $key ? null : ':c' === substr( (string) $key, -2 );
   }
 
   /** @return string[] One "item N: change Q at location L" per needed movement; empty when at target. */

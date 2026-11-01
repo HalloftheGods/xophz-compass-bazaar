@@ -15,9 +15,13 @@
  *   wc_update_product_stock, a WooCommerce admin stock edit, a duplicate
  *   hook, a change inside a Bazaar transaction, and the audit.
  * - seq_ledger: a ledger-owned order (a checkout row plus sync_order) through
- *   completed, cancelled, re-opened and an admin refund with restock.
- * - cleanup SAVED: trashes the orders tagged with _bazaar_test_run = RUN,
- *   deletes the checkout row, the fixtures' ledger rows and outbox rows,
+ *   completed, cancelled, re-opened and an admin refund with restock; then a
+ *   ledger-owned order completed, cancelled and fully refunded (finding 16
+ *   of #6983), and a backorders product F oversold to -2 that then stops
+ *   managing stock (finding 17). Prints F's id as ledger.F.
+ * - cleanup SAVED, EXTRA: trashes the orders tagged with _bazaar_test_run =
+ *   RUN, deletes the checkout row, the fixtures' ledger rows and outbox rows
+ *   (EXTRA: more product ids, comma separated, created by the sequences),
  *   trashes the products and restores the saved options.
  *
  * Only touches the ids it is given and the orders and checkout row tagged with
@@ -306,9 +310,58 @@ switch ( $env( 'FIX_ACTION' ) ) {
     $audit = $fixture_audit( $pids, [ $oid ] );
     $say( 'ledger.audit.fixture_violations', count( $audit['mine'] ) );
     $say( 'ledger.audit.fixture_detail', $audit['mine'] );
+
+    // Finding 16: completed, cancelled (stock returned), then fully refunded
+    $e = $tagged_order( [ [ $d, 1 ] ], $run );
+    $e->update_meta_data( '_bazaar_stock_owner', 'ledger' );
+    $e->update_meta_data( '_bazaar_location_id', 0 );
+    $e->save();
+    $eid = $e->get_id();
+    wc_get_order( $eid )->update_status( 'completed' );
+    wc_get_order( $eid )->update_status( 'cancelled' );
+    $e     = wc_get_order( $eid );
+    $eitem = array_key_first( $e->get_items() );
+    $total = (string) $e->get_total();
+    $er    = wc_create_refund( [ 'order_id' => $eid, 'amount' => $total, 'reason' => "stock observer $run", 'line_items' => [ $eitem => [ 'qty' => 1, 'refund_total' => $total, 'refund_tax' => [] ] ], 'restock_items' => true, 'refund_payment' => false ] );
+    $say( 'cancel_refund.created', ! is_wp_error( $er ) );
+    $say( 'cancel_refund.status', wc_get_order( $eid )->get_status() );
+    $say( 'cancel_refund.net_outflow', -(float) $wpdb->get_var( $wpdb->prepare( 'SELECT COALESCE(SUM(qty_delta), 0) FROM ' . $tbl( 'stock_movements' ) . ' WHERE order_id = %d', $eid ) ) );
+    $audit = $fixture_audit( [], [ $eid ] );
+    $say( 'cancel_refund.audit.violations', count( $audit['mine'] ) );
+    $say( 'cancel_refund.audit.detail', $audit['mine'] );
+
+    // Finding 17: a backorder notice stays a notice once the product stops managing stock
+    $f = new WC_Product_Simple();
+    $f->set_name( "Stock observer backorder $run" );
+    $f->set_status( 'private' );
+    $f->set_regular_price( '3.00' );
+    $f->set_manage_stock( true );
+    $f->set_backorders( 'yes' );
+    $f->set_stock_quantity( 0 );
+    $f->save();
+    $fid = $f->get_id();
+    $say( 'ledger.F', $fid );
+    Xophz_Compass_Bazaar_Stock_Factory::service()->adjust( Xophz_Compass_Bazaar_Stock_Keys::adjust( $admin, "$run-neg" ), $fid, 0, -2, 'adjust', new Xophz_Compass_Bazaar_Stock_Meta( [ 'actor_user_id' => $admin ] ) );
+    $types = function ( array $entries ) use ( $fid ): array {
+      return array_values( array_unique( array_column( array_filter( $entries, function ( $v ) use ( $fid ) {
+        return (int) ( $v['stock_product_id'] ?? 0 ) === $fid;
+      } ), 'type' ) ) );
+    };
+    $all = Xophz_Compass_Bazaar_Stock_Audit::run();
+    $say( 'backorder.balance', $state( $fid )['bal'] );
+    $say( 'backorder.violations', $types( $all['violations'] ) );
+    $say( 'backorder.notices', $types( $all['notices'] ) );
+    $f = wc_get_product( $fid );
+    $f->set_manage_stock( false );
+    $f->save();
+    $all = Xophz_Compass_Bazaar_Stock_Audit::run();
+    $say( 'unmanaged.violations', $types( $all['violations'] ) );
+    $say( 'unmanaged.notices', $types( $all['notices'] ) );
     break;
 
   case 'cleanup':
+    $extra = array_values( array_filter( array_map( 'intval', explode( ',', $env( 'EXTRA' ) ) ) ) );
+    $pids  = array_merge( $pids, $extra );
     $orders = wc_get_orders( [ 'limit' => -1, 'type' => 'shop_order', 'status' => array_keys( wc_get_order_statuses() ), 'meta_query' => [ [ 'key' => '_bazaar_test_run', 'value' => $run ] ] ] );
     $trashed_orders = 0;
     foreach ( $orders as $order ) {
@@ -329,7 +382,7 @@ switch ( $env( 'FIX_ACTION' ) ) {
       $wpdb->query( 'DELETE FROM ' . $tbl( 'stock_balances' ) . " WHERE stock_product_id IN ($in)" );
     }
     $trashed = 0;
-    foreach ( array_filter( [ $ids['V'], $ids['VP'], $ids['A'], $ids['B'], $ids['C'], $ids['D'] ] ) as $id ) {
+    foreach ( array_filter( array_merge( [ $ids['V'], $ids['VP'], $ids['A'], $ids['B'], $ids['C'], $ids['D'] ], $extra ) ) as $id ) {
       $trashed += wp_trash_post( $id ) ? 1 : 0;
     }
     $saved = json_decode( $env( 'SAVED' ), true );

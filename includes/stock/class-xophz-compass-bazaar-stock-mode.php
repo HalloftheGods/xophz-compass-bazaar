@@ -110,8 +110,11 @@ final class Xophz_Compass_Bazaar_Stock_Mode {
   /**
    * I2 drift: products with balances whose `_stock` (lowest meta_id row)
    * differs from location 0 plus every enabled location by 0.00005 or more.
-   * Products whose post no longer exists, or that have no `_stock` row, are
-   * skipped. This checks only I2; it is not the full Stock_Audit.
+   * Products whose post no longer exists, that have no `_stock` row, or
+   * that no longer manage stock (`_manage_stock` is not 'yes') are skipped:
+   * no ledger write reaches them any more, so a difference could never be
+   * cleared (finding 17 of #6983). This checks only I2; it is not the full
+   * Stock_Audit.
    *
    * @return array[] Each ['stock_product_id', 'wc_stock', 'projectable'].
    */
@@ -119,13 +122,14 @@ final class Xophz_Compass_Bazaar_Stock_Mode {
     global $wpdb;
     $rows = Xophz_Compass_Bazaar_Core_Db::get_results(
       'SELECT b.stock_product_id, SUM(CASE WHEN b.location_id = 0 OR b.is_enabled = 1 THEN b.on_hand ELSE 0 END) AS projectable,'
-        . " (SELECT pm.meta_value FROM {$wpdb->postmeta} pm WHERE pm.post_id = b.stock_product_id AND pm.meta_key = '_stock' ORDER BY pm.meta_id LIMIT 1) AS wc_stock"
+        . " (SELECT pm.meta_value FROM {$wpdb->postmeta} pm WHERE pm.post_id = b.stock_product_id AND pm.meta_key = '_stock' ORDER BY pm.meta_id LIMIT 1) AS wc_stock,"
+        . " (SELECT pm.meta_value FROM {$wpdb->postmeta} pm WHERE pm.post_id = b.stock_product_id AND pm.meta_key = '_manage_stock' ORDER BY pm.meta_id LIMIT 1) AS manages"
         . ' FROM ' . Xophz_Compass_Bazaar_Core_Db::table( 'stock_balances' ) . " b JOIN {$wpdb->posts} p ON p.ID = b.stock_product_id"
         . ' GROUP BY b.stock_product_id ORDER BY b.stock_product_id'
     );
     $out = [];
     foreach ( $rows as $row ) {
-      if ( null === $row->wc_stock ) {
+      if ( null === $row->wc_stock || 'yes' !== (string) $row->manages ) {
         continue;
       }
       $wc          = is_numeric( $row->wc_stock ) ? (float) $row->wc_stock : 0.0;

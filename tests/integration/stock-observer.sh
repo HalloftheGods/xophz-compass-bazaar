@@ -18,6 +18,11 @@
 #   WooCommerce never reduces it; cancelling returns stock once; re-opening
 #   sells again; an admin refund with restock returns stock once; no item
 #   carries _reduced_stock; the audit finds nothing for the fixtures;
+# - ledger mode: an order completed, cancelled and then fully refunded has
+#   no order_target violation (the refunded target follows the last sync,
+#   finding 16 of #6983); a backorders product oversold to -2 is a notice,
+#   and stays one (negative_balance_untracked, no drift) once it stops
+#   managing stock (finding 17);
 # - CLI: `wp bazaar stock verify` exits 0 (in both modes); an unknown mode
 #   exits 1 with invalid_request; reconcile of an in-step product records
 #   nothing; the help lists the stock and checkouts commands.
@@ -65,8 +70,9 @@ if [ -z "${D:-}" ] || [ -z "${V:-}" ]; then
   echo "setup failed: $setup"
   exit 1
 fi
+EXTRA=""
 cleanup() {
-  fix cleanup -e A="$A" -e B="$B" -e C="$C" -e D="$D" -e V="$V" -e VP="$VP" -e SAVED="$SAVED" >/dev/null
+  fix cleanup -e A="$A" -e B="$B" -e C="$C" -e D="$D" -e V="$V" -e VP="$VP" -e SAVED="$SAVED" -e EXTRA="$EXTRA" >/dev/null
 }
 trap cleanup EXIT
 IDS=(-e A="$A" -e B="$B" -e C="$C" -e D="$D" -e V="$V" -e VP="$VP" -e ADMIN="$ADMIN")
@@ -153,6 +159,16 @@ expect 'ledger refund: no extra batch' "$out" 'refunded_again.D.batches=5'
 expect 'ledger: no item carries _reduced_stock' "$out" 'ledger.wc_reduced_items=0'
 expect 'ledger: only ledger batches, none observed' "$out" 'ledger.D.reasons=["opening","sale","sale_reversal","resale","refund_restock"]'
 expect 'ledger audit: nothing for the fixtures' "$out" 'ledger.audit.fixture_violations=0'
+EXTRA="$EXTRA,$(sed -n 's/^ledger.F=//p' <<<"$out")"
+expect 'cancel then refund: the refund is created' "$out" 'cancel_refund.created=true'
+expect 'cancel then refund: the order is refunded' "$out" 'cancel_refund.status=refunded'
+expect 'cancel then refund: the stock stays returned' "$out" 'cancel_refund.net_outflow=0'
+expect 'cancel then refund: no order_target violation' "$out" 'cancel_refund.audit.violations=0'
+expect 'backorder: oversold to -2' "$out" 'backorder.balance=-2'
+expect 'backorder: no violation' "$out" 'backorder.violations=[]'
+expect 'backorder: a backorder notice' "$out" 'backorder.notices=["negative_balance_backorder"]'
+expect 'unmanaged: still no violation (no drift either)' "$out" 'unmanaged.violations=[]'
+expect 'unmanaged: an untracked notice' "$out" 'unmanaged.notices=["negative_balance_untracked"]'
 
 out="$(wp_cli bazaar stock verify)"
 expect 'cli verify (ledger): exits 0' "$out" 'exit=0'
