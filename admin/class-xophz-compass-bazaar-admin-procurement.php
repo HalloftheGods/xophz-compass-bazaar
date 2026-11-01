@@ -272,36 +272,128 @@ class Xophz_Compass_Bazaar_Admin_Procurement {
 		) );
 	}
 
+	/**
+	 * AJAX: receive a purchase order (spec 8.9).
+	 *
+	 * Guarantees: needs bazaar_receive and a bazaar_po post. The status is
+	 * claimed with one conditional UPDATE (not received or receiving, to
+	 * receiving), so of two parallel calls one receives and the other gets
+	 * code already_received. Ledger mode applies one batch po:{id}:receive
+	 * (reason receive, unit cost from _po_items); other modes add each line
+	 * with an atomic wc_update_product_stock increase inside a context. The
+	 * status becomes received afterwards; if receiving throws, the previous
+	 * status is restored.
+	 *
+	 * Not guaranteed: outside ledger mode a failure half way keeps the lines
+	 * already added, so a retry after the restore would add them again.
+	 */
 	public function receive_po() {
 		$po_id = isset($_POST['id']) ? intval($_POST['id']) : 0;
-		$current_status = get_post_meta( $po_id, '_po_status', true );
-
-		if ( $current_status === 'received' ) {
-			wp_send_json_error( array( 'message' => 'PO is already received.' ) );
+		if ( ! Xophz_Compass_Bazaar_Security_Guard::can_any( Xophz_Compass_Bazaar_Security_Capabilities::RECEIVE ) ) {
+			wp_send_json_error( array( 'message' => 'You do not have permission to receive purchase orders.', 'code' => 'forbidden' ), 403 );
+		}
+		$previous = $po_id > 0 && 'bazaar_po' === get_post_type( $po_id ) ? (string) get_post_meta( $po_id, '_po_status', true ) : '';
+		if ( '' === $previous ) {
+			wp_send_json_error( array( 'message' => 'Purchase order not found.', 'code' => 'po_not_found' ), 404 );
 		}
 
-		$items = get_post_meta( $po_id, '_po_items', true );
-		if ( !empty($items) && is_array($items) ) {
-			foreach ($items as $item) {
-				$product_id = $item['product_id'];
-				$qty = $item['qty'];
-
-				if ( $product_id ) {
-					$product = wc_get_product( $product_id );
-					if ( $product && $product->managing_stock() ) {
-						$current_stock = $product->get_stock_quantity() ? $product->get_stock_quantity() : 0;
-						$product->set_stock_quantity( $current_stock + $qty );
-						$product->save();
-					}
-				}
-			}
+		global $wpdb;
+		$claimed = $wpdb->query( $wpdb->prepare(
+			"UPDATE {$wpdb->postmeta} SET meta_value = 'receiving' WHERE post_id = %d AND meta_key = '_po_status' AND meta_value NOT IN ('received','receiving')",
+			$po_id
+		) );
+		wp_cache_delete( $po_id, 'post_meta' );
+		if ( 1 !== (int) $claimed ) {
+			wp_send_json_error( array( 'message' => 'PO is already received.', 'code' => 'already_received' ) );
 		}
 
-		update_post_meta( $po_id, '_po_status', 'received' );
+		$error = null;
+		try {
+			$this->add_po_stock( $po_id );
+			update_post_meta( $po_id, '_po_status', 'received' );
+		} catch ( \Throwable $e ) {
+			update_post_meta( $po_id, '_po_status', $previous );
+			$error = $e->getMessage();
+		}
+		if ( null !== $error ) {
+			wp_send_json_error( array( 'message' => $error, 'code' => 'receive_failed' ), 500 );
+		}
 
 		wp_send_json_success( array( 
 			'message' => 'Inventory updated and PO marked as received.' 
 		) );
+	}
+
+	/** Add the PO's lines to stock: one ledger batch in ledger mode, an atomic increase per line otherwise. */
+	private function add_po_stock( int $po_id ): void {
+		$items = get_post_meta( $po_id, '_po_items', true );
+		if ( empty( $items ) || ! is_array( $items ) ) {
+			return;
+		}
+		$ledger    = Xophz_Compass_Bazaar_Stock_Mode::is_ledger();
+		$requested = (int) get_post_meta( $po_id, '_po_location_id', true );
+		$totals    = array();
+		foreach ( $items as $item ) {
+			$product = ! empty( $item['product_id'] ) ? wc_get_product( intval( $item['product_id'] ) ) : null;
+			$qty     = isset( $item['qty'] ) ? (float) $item['qty'] : 0.0;
+			if ( ! $product || ! $product->managing_stock() || ! ( $qty > 0 ) ) {
+				continue;
+			}
+			if ( ! $ledger ) {
+				Xophz_Compass_Bazaar_Stock_Context::with(
+					'receive',
+					function () use ( $product, $qty ) {
+						wc_update_product_stock( $product, $qty, 'increase' );
+					},
+					array( 'type' => 'po', 'id' => $po_id )
+				);
+				continue;
+			}
+			$stock_key = (int) $product->get_stock_managed_by_id();
+			$location  = $this->po_location( $product->get_id(), $stock_key, $requested );
+			$cell      = $stock_key . ':' . $location;
+			$cost      = Xophz_Compass_Bazaar_Core_Money::to_minor( isset( $item['cost'] ) ? max( 0.0, (float) $item['cost'] ) : 0.0, null );
+			$totals[ $cell ] = isset( $totals[ $cell ] )
+				? array_merge( $totals[ $cell ], array( 'qty' => $totals[ $cell ]['qty'] + $qty, 'value' => $totals[ $cell ]['value'] + $cost * $qty ) )
+				: array( 'product' => $product, 'key' => $stock_key, 'location' => $location, 'qty' => $qty, 'value' => $cost * $qty );
+		}
+		if ( ! $totals ) {
+			return;
+		}
+		$lines = array();
+		foreach ( $totals as $row ) {
+			$lines[] = new Xophz_Compass_Bazaar_Stock_Line(
+				$row['key'],
+				$row['location'],
+				$row['qty'],
+				array(
+					'product_id'      => $row['product']->is_type( 'variation' ) ? $row['product']->get_parent_id() : $row['product']->get_id(),
+					'variation_id'    => $row['product']->is_type( 'variation' ) ? $row['product']->get_id() : 0,
+					'unit_cost_minor' => (int) round( $row['value'] / $row['qty'] ),
+					'cost_currency'   => get_woocommerce_currency(),
+					'cost_source'     => 'po',
+				)
+			);
+		}
+		Xophz_Compass_Bazaar_Admin_Product_Stock::prepare_stock( array_values( array_unique( array_map( function ( $row ) { return $row['key']; }, $totals ) ) ) );
+		Xophz_Compass_Bazaar_Stock_Factory::service()->apply(
+			new Xophz_Compass_Bazaar_Stock_Batch(
+				Xophz_Compass_Bazaar_Stock_Keys::po_receive( $po_id ),
+				'receive',
+				$lines,
+				Xophz_Compass_Bazaar_Admin_Product_Stock::meta(),
+				array( 'source_type' => 'po', 'source_id' => $po_id )
+			)
+		);
+	}
+
+	/** The PO's location when the product has it, else the default; 0 for a product without locations. */
+	private function po_location( int $product_id, int $stock_key, int $requested ): int {
+		$entries = Xophz_Compass_Bazaar_Stock_Locations::inventory_entries( $stock_key );
+		if ( ! $entries ) {
+			return 0;
+		}
+		return Xophz_Compass_Bazaar_Admin_Product_Stock::location( $product_id, isset( $entries[ $requested ] ) ? $requested : 0 );
 	}
 
 }
