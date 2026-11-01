@@ -61,6 +61,38 @@ class Xophz_Compass_Bazaar_Checkout_Order_Writer {
     return $order;
   }
 
+  /** Restart a failed, received or priced row, then cancel any order the old attempt saved but never recorded. */
+  public static function restart_clean( array $row ): ?array {
+    $fresh = Xophz_Compass_Bazaar_Checkout_Repository::restart( $row );
+    if ( $fresh ) {
+      self::cancel_unrecorded( $fresh, 'checkout_interrupted', 'restarted' );
+    }
+    return $fresh;
+  }
+
+  /**
+   * Cancel (never delete) orders that carry this row's checkout id but that the row never recorded.
+   * Covers an order saved by open() before the row moved to order_created. Call only while holding the row's lease.
+   * Best effort: a failure is logged, not thrown.
+   */
+  public static function cancel_unrecorded( array $row, string $code, string $reason ): int {
+    $cancelled = 0;
+    try {
+      $orders = wc_get_orders( [ 'limit' => -1, 'status' => 'any', 'meta_key' => '_bazaar_checkout_id', 'meta_value' => (int) $row['id'] ] );
+      foreach ( $orders as $order ) {
+        if ( ! $order instanceof WC_Order || (int) $order->get_id() === (int) ( $row['order_id'] ?? 0 ) || in_array( $order->get_status(), [ 'cancelled', 'completed', 'refunded' ], true ) ) {
+          continue;
+        }
+        $order->update_meta_data( '_bazaar_failure_code', $code );
+        $order->update_status( 'cancelled', 'Bazaar POS checkout ended before the row recorded this order (' . $reason . '); the order was cancelled, not deleted.' );
+        $cancelled++;
+      }
+    } catch ( Throwable $e ) {
+      error_log( 'Bazaar checkout ' . (int) $row['id'] . ' unrecorded order cancel failed: ' . $e->getMessage() );
+    }
+    return $cancelled;
+  }
+
   /**
    * Add the priced items, compute WooCommerce's totals and assert parity.
    *

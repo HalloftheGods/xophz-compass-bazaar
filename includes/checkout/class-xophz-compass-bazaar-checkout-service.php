@@ -170,7 +170,7 @@ class Xophz_Compass_Bazaar_Checkout_Service {
       return [ 'response' => self::replay( $row ) ];
     }
     if ( $S::FAILED === $state ) {
-      return [ 'row' => Xophz_Compass_Bazaar_Checkout_Repository::restart( $row ) ?? self::throw_in_progress() ];
+      return [ 'row' => Xophz_Compass_Bazaar_Checkout_Order_Writer::restart_clean( $row ) ?? self::throw_in_progress() ];
     }
     if ( Xophz_Compass_Bazaar_Checkout_Repository::lease_live( $row ) ) {
       self::throw_in_progress();
@@ -186,7 +186,7 @@ class Xophz_Compass_Bazaar_Checkout_Service {
       throw $err;
     }
     if ( $S::RECEIVED === $state || $S::PRICED === $state ) {
-      return [ 'row' => Xophz_Compass_Bazaar_Checkout_Repository::restart( $row ) ?? self::throw_in_progress() ];
+      return [ 'row' => Xophz_Compass_Bazaar_Checkout_Order_Writer::restart_clean( $row ) ?? self::throw_in_progress() ];
     }
     self::throw_in_progress();
   }
@@ -350,6 +350,7 @@ class Xophz_Compass_Bazaar_Checkout_Service {
         Xophz_Compass_Bazaar_Checkout_Repository::transition( $current, Xophz_Compass_Bazaar_Checkout_State::FAILED, self::error_changes( $err, false ) );
       }
     } elseif ( Xophz_Compass_Bazaar_Checkout_State::PRICED === $current['state'] ) {
+      Xophz_Compass_Bazaar_Checkout_Order_Writer::cancel_unrecorded( $current, $err->error_code(), $err->getMessage() );
       Xophz_Compass_Bazaar_Checkout_Repository::transition( $current, Xophz_Compass_Bazaar_Checkout_State::FAILED, self::error_changes( $err, true ) );
     }
     throw $err;

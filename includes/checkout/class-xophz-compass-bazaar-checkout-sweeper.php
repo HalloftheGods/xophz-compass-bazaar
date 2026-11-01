@@ -95,7 +95,8 @@ class Xophz_Compass_Bazaar_Checkout_Sweeper {
       return $service->cancel( $row, Xophz_Compass_Bazaar_Checkout_Service::interrupted() ) ? 'cancelled' : 'skipped';
     }
     if ( $S::RECEIVED === $row['state'] || $S::PRICED === $row['state'] ) {
-      $err  = new Xophz_Compass_Bazaar_Core_Http_Error( 'checkout_interrupted', 'The checkout stopped before an order was created. Nothing was charged.', 409 );
+      $err  = new Xophz_Compass_Bazaar_Core_Http_Error( 'checkout_interrupted', 'The checkout stopped before an order was recorded. Nothing was charged.', 409 );
+      Xophz_Compass_Bazaar_Checkout_Order_Writer::cancel_unrecorded( $row, 'checkout_interrupted', 'swept' );
       $done = Xophz_Compass_Bazaar_Checkout_Repository::transition( $row, $S::FAILED, Xophz_Compass_Bazaar_Checkout_Service::error_changes( $err, true ) );
       return $done ? 'failed' : 'skipped';
     }

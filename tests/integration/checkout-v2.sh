@@ -92,6 +92,7 @@ expect_equal 'after_order_created: 500, order cancelled not deleted, nothing mov
 expect_equal 'after_order_created retry: replayed, no new order, movement or payment, token unspent' "$(check_line retry_after_order_created)" '500 true 0 0 0 token-unspent'
 expect_equal 'in_commit: 500, rolled back, order cancelled not deleted' "$(check_line fail_in_commit)" '500 internal cancelled cancelled internal 0 0 0'
 expect_equal 'in_commit retry: replayed, no new order, movement or payment, token unspent' "$(check_line retry_in_commit)" '500 true 0 0 0 token-unspent'
+expect_equal 'order saved then open() throws: 500, order cancelled, retry completes on one live order' "$(check_line orphan_open)" '500 failed cancelled 200 completed cancelled,completed'
 expect_equal 'after_commit: 500 finalize_pending, committed, paid and moved once' "$(check_line fail_after_commit)" '500 finalize_pending committed pending 1 1 1'
 expect_equal 'after_commit retry: completed, still one movement and one payment' "$(check_line retry_after_commit)" '200 completed completed 1 1 1'
 expect_equal 'crash: live lease is in progress; expired retry is checkout_interrupted and cancels' "$(check_line crash_retry)" 'checkout_in_progress 409 checkout_interrupted cancelled cancelled'

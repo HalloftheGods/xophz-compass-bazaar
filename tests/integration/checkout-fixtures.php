@@ -370,6 +370,20 @@ if ( ! function_exists( 'bz_co_run' ) ) {
       bz_co_say( "fail_$point", implode( ' ', [ $r['status'], $r['data']['code'] ?? '-', $row['state'], $o ? $o->get_status() : 'no-order', $o ? $o->get_meta( '_bazaar_failure_code' ) : '-', bz_co_moves( (int) $row['order_id'] ), bz_co_payments( (int) $row['id'] ), $stock - bz_co_stock( $A ) ] ) );
       bz_co_say( "retry_$point", implode( ' ', [ $retry['status'], var_export( $retry['data']['data']['replayed'] ?? null, true ), bz_co_orders() - $before, bz_co_moves( (int) $row['order_id'] ), bz_co_payments( (int) $row['id'] ), '' === Xophz_Compass_Bazaar_Pos_Authorization::peek( $token, $admin, 'ppcp-gateway', $T / 100 ) ? 'token-unspent' : 'token-spent' ] ) );
     }
+    // open() saves the order, then a hook throws: the order is cancelled, and a same-key retry makes the only live order.
+    $key  = bz_co_key();
+    $body = bz_co_body( $key, $one, bz_co_cash( $T ) );
+    $boom = function ( $o ) { if ( $o instanceof WC_Order && $o->get_meta( '_bazaar_checkout_id' ) && 'pending' === $o->get_status() ) { throw new Error( 'boom' ); /* WC_Order::save() swallows Exception, not Error. */ } };
+    add_action( 'woocommerce_after_order_object_save', $boom );
+    $r = bz_co_post( $body );
+    remove_action( 'woocommerce_after_order_object_save', $boom );
+    $row    = bz_co_row( $key );
+    $cid    = (int) $row['id'];
+    $mine   = function () use ( $cid ) { return wc_get_orders( [ 'limit' => -1, 'status' => 'any', 'meta_key' => '_bazaar_checkout_id', 'meta_value' => $cid ] ); };
+    $stat   = function () use ( $mine ) { $x = array_map( function ( $o ) { return $o->get_status(); }, $mine() ); sort( $x ); return implode( ',', $x ); };
+    $first  = $stat();
+    $retry  = bz_co_post( $body );
+    bz_co_say( 'orphan_open', implode( ' ', [ $r['status'], $row['state'], $first, $retry['status'], $retry['data']['state'] ?? '-', $stat() ] ) );
     $key   = bz_co_key();
     $stock = bz_co_stock( $A );
     bz_co_fail( 'after_commit' );
