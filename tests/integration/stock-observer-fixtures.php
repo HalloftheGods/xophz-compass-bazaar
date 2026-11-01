@@ -14,6 +14,13 @@
  * - seq_shadow: web orders (sale, restore, refund restock), a card-vault-style
  *   wc_update_product_stock, a WooCommerce admin stock edit, a duplicate
  *   hook, a change inside a Bazaar transaction, and the audit.
+ * - seq_locations (shadow mode, findings 14 and 15 of #6983): a product L
+ *   tracked at two private warehouses WA 5 and WB 5. A legacy location
+ *   count (WA 8) and a disable (WB) are recorded per location; a web order
+ *   sold from WA is booked at WA; then, in ledger mode, a ledger sale at WA
+ *   projects the counted value minus one into the meta, and a web order
+ *   from WA is again booked at WA. Prints L, WA and WB as loc.L, loc.WA,
+ *   loc.WB, and leaves the mode at shadow.
  * - seq_ledger: a ledger-owned order (a checkout row plus sync_order) through
  *   completed, cancelled, re-opened and an admin refund with restock; then a
  *   ledger-owned order completed, cancelled and fully refunded (finding 16
@@ -246,6 +253,78 @@ switch ( $env( 'FIX_ACTION' ) ) {
     $say( 'shadow.audit.fixture_violations', count( $audit['mine'] ) );
     $say( 'shadow.audit.fixture_detail', $audit['mine'] );
     $say( 'shadow.audit.drift_anywhere', (int) ( $audit['all']['counts']['projection_drift'] ?? 0 ) );
+    break;
+
+  case 'seq_locations':
+    $wh = [];
+    foreach ( [ 'WA', 'WB' ] as $name ) {
+      $wh[ $name ] = (int) wp_insert_post( [ 'post_type' => 'compass_warehouse', 'post_status' => 'private', 'post_title' => "Stock observer $name $run" ] );
+      $say( "loc.$name", $wh[ $name ] );
+    }
+    $entry = function ( int $loc, float $qty, bool $on ): array {
+      return [ 'location_id' => $loc, 'stock_quantity' => $qty, 'low_stock_threshold' => 5, 'sku' => '', 'price' => null, 'is_enabled' => $on ];
+    };
+    // Created with the observer held off, so the opening batch sees the meta.
+    $lid = Xophz_Compass_Bazaar_Stock_Wc_Port_Wpdb::while_writing( function () use ( $product, $run, $entry, $wh ) {
+      $id = $product( 10, "Stock observer locations $run" );
+      update_post_meta( $id, '_compass_multi_inventory', [ $wh['WA'] => $entry( $wh['WA'], 5, true ), $wh['WB'] => $entry( $wh['WB'], 5, true ) ] );
+      return $id;
+    } );
+    $say( 'loc.L', $lid );
+    Xophz_Compass_Bazaar_Stock_Factory::service()->ensure_initialized( $lid );
+    $loc_state = function ( string $prefix ) use ( $lid, $wh, $wpdb, $tbl, $say ) {
+      wp_cache_delete( $lid, 'post_meta' );
+      $meta = (array) get_post_meta( $lid, '_compass_multi_inventory', true );
+      $say( "$prefix.wc", (float) get_post_meta( $lid, '_stock', true ) );
+      foreach ( [ 0 => 'L0', $wh['WA'] => 'WA', $wh['WB'] => 'WB' ] as $loc => $name ) {
+        $row = $wpdb->get_row( $wpdb->prepare( 'SELECT on_hand, is_enabled FROM ' . $tbl( 'stock_balances' ) . ' WHERE stock_product_id = %d AND location_id = %d', $lid, $loc ) );
+        $say( "$prefix.$name", $row ? Xophz_Compass_Bazaar_Stock_Keys::number( (float) $row->on_hand ) . ( (int) $row->is_enabled ? '' : ' off' ) : 'none' );
+        if ( $loc > 0 ) {
+          $say( "$prefix.meta.$name", $meta[ $loc ]['stock_quantity'] ?? null );
+        }
+      }
+    };
+    $loc_state( 'loc.open' );
+    // Finding 14: shadow-mode location writes are recorded per location
+    Xophz_Compass_Bazaar_Admin_Product_Stock::set_location_stock( $lid, $wh['WA'], 8, "$run-la" );
+    $loc_state( 'loc.count' );
+    Xophz_Compass_Bazaar_Admin_Product_Stock::set_location_stock( $lid, $wh['WB'], 5, "$run-lb", [ 'is_enabled' => false ] );
+    $loc_state( 'loc.disable' );
+    // Finding 15: an observed web order is booked where it was sold
+    $sold = $tagged_order( [ [ $lid, 1 ] ], $run );
+    $sold->update_meta_data( '_bazaar_location_id', $wh['WA'] );
+    $sold->save();
+    wc_get_order( $sold->get_id() )->update_status( 'processing' );
+    $loc_state( 'loc.web' );
+    $mine = function () use ( $lid ): array {
+      $report = Xophz_Compass_Bazaar_Stock_Audit::run();
+      $pick   = function ( array $entries ) use ( $lid ): array {
+        return array_values( array_unique( array_column( array_filter( $entries, function ( $v ) use ( $lid ) {
+          return (int) ( $v['stock_product_id'] ?? 0 ) === $lid;
+        } ), 'type' ) ) );
+      };
+      return [ $pick( $report['violations'] ), $pick( $report['notices'] ) ];
+    };
+    list( $violations, $notices ) = $mine();
+    $say( 'loc.shadow.violations', $violations );
+    $say( 'loc.shadow.notices', $notices );
+    // Ledger mode: the projection keeps the counted value; a web order still leaves WA
+    try {
+      Xophz_Compass_Bazaar_Stock_Mode::set( 'ledger', [ 'reason' => "stock-observer.sh $run" ] );
+    } catch ( Xophz_Compass_Bazaar_Core_Http_Error $e ) {
+      Xophz_Compass_Bazaar_Stock_Mode::set( 'ledger', [ 'force_with_drift' => true, 'reason' => "stock-observer.sh $run: " . $e->getMessage() ] );
+    }
+    Xophz_Compass_Bazaar_Stock_Factory::service()->adjust( Xophz_Compass_Bazaar_Stock_Keys::adjust( (int) $env( 'ADMIN' ), "$run-lsale" ), $lid, $wh['WA'], -1, 'sale', new Xophz_Compass_Bazaar_Stock_Meta( [ 'actor_user_id' => (int) $env( 'ADMIN' ) ] ) );
+    $loc_state( 'loc.ledger_sale' );
+    $web = $tagged_order( [ [ $lid, 1 ] ], $run );
+    $web->update_meta_data( '_bazaar_location_id', $wh['WA'] );
+    $web->save();
+    wc_get_order( $web->get_id() )->update_status( 'processing' );
+    $loc_state( 'loc.ledger_web' );
+    $say( 'loc.ledger_web.available_WA', Xophz_Compass_Bazaar_Stock_Factory::service()->available( $lid, $wh['WA'] ) );
+    list( $violations, $notices ) = $mine();
+    $say( 'loc.ledger.violations', $violations );
+    update_option( 'bazaar_ledger_mode', 'shadow' );
     break;
 
   case 'seq_ledger':

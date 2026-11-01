@@ -275,6 +275,48 @@ $r = $svc->sync_order( 201, true, [ [ 'order_item_id' => 22, 'product_id' => 5, 
 check( 'gap locks: a stale sale of the same order sells once', [ $r->noop() || $r->replayed(), $wc->stock[5], $svc->available( 5, 0 ) ], [ true, 7.0, 7.0 ] );
 check( 'gap locks: invariants', $clean( $store, $wc ), [] );
 
+// Findings 14 and 15 of #6983: observed changes are booked at the right location
+list( $store, $wc, $svc ) = $fresh();
+$bal = function ( int $pid ) use ( $store ) {
+  return array_map( function ( $row ) { return [ $row['on_hand'], $row['is_enabled'] ]; }, $store->balances( $pid ) );
+};
+$wc->add_product( 40, 10, [], [ 1 => [ 5, true ], 2 => [ 5, true ] ] );
+$svc->ensure_initialized( 40 );
+// A legacy location save in shadow mode: meta A = 8, `_stock` = the enabled total
+$wc->multi[40][1]['qty'] = 8.0;
+$wc->external_write( 40, 13 );
+$r = $svc->reconcile_from_wc( 40, 'count', $meta, [ 'type' => 'inventory', 'id' => 40 ], [ 'locations' => true ] );
+check( 'locations: a shadow count is booked at its location', [ array_map( function ( $l ) { return [ $l['location_id'], $l['qty_delta'] ]; }, $r->lines() ), $bal( 40 ) ], [ [ [ 1, 3.0 ] ], [ 0 => [ 0.0, true ], 1 => [ 8.0, true ], 2 => [ 5.0, true ] ] ] );
+$svc->adjust( 'adjust:1:loc', 40, 1, -1, 'sale', $meta );
+check( 'locations: the ledger projection then keeps the counted value', [ $wc->multi[40][1]['qty'], $wc->stock[40] ], [ 7.0, 12.0 ] );
+// Disabling a location in the meta: `_stock` drops by its quantity, no movement
+$wc->multi[40][2]['enabled'] = false;
+$wc->external_write( 40, 7 );
+check( 'locations: a disable is a flag, not a movement', [ $svc->reconcile_from_wc( 40, 'count', $meta, [], [ 'locations' => true ] ), $bal( 40 ) ], [ null, [ 0 => [ 0.0, true ], 1 => [ 7.0, true ], 2 => [ 5.0, false ] ] ] );
+// A location dropped from the meta goes to 0
+unset( $wc->multi[40][2] );
+$r = $svc->reconcile_from_wc( 40, 'count', $meta, [], [ 'locations' => true ] );
+check( 'locations: a location missing from the meta is counted to 0', [ $bal( 40 )[2], $wc->stock[40] ], [ [ 0.0, false ], 7.0 ] );
+// Units sold before the backfill opened location 0 negative; a count clears it
+$wc->add_product( 41, 4, [], [ 1 => [ 5, true ] ] );
+$svc->ensure_initialized( 41 );
+$opened = $bal( 41 );
+$wc->multi[41][1]['qty'] = 4.0;
+$svc->reconcile_from_wc( 41, 'count', $meta, [], [ 'locations' => true ] );
+check( 'locations: a count clears the negative location 0 a backfill opened', [ $opened, $bal( 41 ) ], [ [ 0 => [ -1.0, true ], 1 => [ 5.0, true ] ], [ 0 => [ 0.0, true ], 1 => [ 4.0, true ] ] ] );
+// An observed order sale is booked at its sale location
+$wc->add_product( 42, 5, [], [ 1 => [ 5, true ], 3 => [ 0, false ] ] );
+$svc->ensure_initialized( 42 );
+$wc->external_write( 42, 4 );
+$svc->reconcile_from_wc( 42, 'online_sale', $meta, [ 'type' => 'order', 'id' => 7 ], [ 'location' => 1 ] );
+check( 'location: an observed sale leaves its sale location', $bal( 42 ), [ 0 => [ 0.0, true ], 1 => [ 4.0, true ], 3 => [ 0.0, false ] ] );
+$wc->external_write( 42, 3 );
+$svc->reconcile_from_wc( 42, 'online_sale', $meta, [], [ 'location' => 3 ] );
+$wc->external_write( 42, 2 );
+$svc->reconcile_from_wc( 42, 'online_sale', $meta, [], [ 'location' => 99 ] );
+check( 'location: a disabled or unknown location falls back to location 0', $bal( 42 )[0], [ -2.0, true ] );
+check( 'locations: invariants', $clean( $store, $wc ), [] );
+
 // Property test: 2000 seeded random operations keep I1 (balance = sum of
 // movements, running balance_after) and I2 (_stock = projectable sum) after
 // every step, refused operations included.

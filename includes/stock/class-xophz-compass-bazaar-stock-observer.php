@@ -6,8 +6,19 @@
  * (priority 20), and on updated_post_meta / added_post_meta for the `_stock`
  * key only. For each event it calls Stock_Service::reconcile_from_wc(), which
  * locks the product and records the difference between `_stock` and the
- * projectable sum at location 0. Because the difference is taken under lock,
- * a second hook for the same change records nothing.
+ * projectable sum. Because the difference is taken under lock, a second hook
+ * for the same change records nothing.
+ *
+ * Where the difference is booked (findings 14 and 15 of #6983, attribution()):
+ * - a context whose source is an order (a sale, restore or refund restock):
+ *   at the location the order's lines of that product were sold from
+ *   (Stock_Order_Lifecycle::order_lines, so the item's or order's
+ *   _bazaar_location_id, else the default warehouse), when that is an
+ *   enabled location of the product's multi-inventory meta; else at 0;
+ * - a context whose source is 'inventory' (a legacy location save, which
+ *   writes _compass_multi_inventory and then `_stock`): each location to its
+ *   meta quantity and flag, the rest at location 0;
+ * - anything else: at location 0.
  *
  * Attribution: filters at PHP_INT_MAX push a Stock_Context and return their
  * input unchanged:
@@ -114,7 +125,7 @@ final class Xophz_Compass_Bazaar_Stock_Observer {
     try {
       return Xophz_Compass_Bazaar_Core_Db::tx(
         function () use ( $pid, $reason, $source, $actor, $context ) {
-          $result = Xophz_Compass_Bazaar_Stock_Factory::service()->reconcile_from_wc( $pid, $reason, new Xophz_Compass_Bazaar_Stock_Meta( [ 'actor_user_id' => $actor ] ), $source );
+          $result = Xophz_Compass_Bazaar_Stock_Factory::service()->reconcile_from_wc( $pid, $reason, new Xophz_Compass_Bazaar_Stock_Meta( [ 'actor_user_id' => $actor ] ), $source, self::attribution( $pid, $source ) );
           if ( $result && null === $context ) {
             self::drift_event( $pid, $result, $actor );
           }
@@ -165,6 +176,31 @@ final class Xophz_Compass_Bazaar_Stock_Observer {
 
   public static function close_refund(): void {
     self::close( 'refund' );
+  }
+
+  /**
+   * Stock_Service::reconcile_from_wc attribution for a change seen under a
+   * context with this source: ['locations' => true] for an inventory save,
+   * ['location' => L] when every line of the order for this product's stock
+   * key was sold from L, else [] (location 0).
+   */
+  public static function attribution( int $pid, array $source ): array {
+    $type = (string) ( $source['type'] ?? '' );
+    if ( 'inventory' === $type ) {
+      return [ 'locations' => true ];
+    }
+    $order = 'order' === $type && (int) ( $source['id'] ?? 0 ) > 0 && function_exists( 'wc_get_order' ) ? wc_get_order( (int) $source['id'] ) : null;
+    if ( ! $order instanceof WC_Order ) {
+      return [];
+    }
+    $key  = Xophz_Compass_Bazaar_Stock_Locations::stock_key( $pid );
+    $locs = [];
+    foreach ( Xophz_Compass_Bazaar_Stock_Order_Lifecycle::order_lines( $order ) as $line ) {
+      if ( (int) $line['stock_product_id'] === $key ) {
+        $locs[ (int) $line['location_id'] ] = true;
+      }
+    }
+    return 1 === count( $locs ) ? [ 'location' => (int) array_key_first( $locs ) ] : [];
   }
 
   /** sale for v2 checkouts and legacy POS orders, online_sale otherwise. */

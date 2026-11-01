@@ -31,7 +31,12 @@
  * negative balance of a product that was deleted or no longer manages
  * stock, which no ledger write can reach; finding 17 of #6983),
  * order_status_unchecked (a ledger-owned order in a status this audit has
- * no target for).
+ * no target for), location_meta_drift (a _compass_multi_inventory entry
+ * whose stock_quantity or is_enabled differs from its ledger balance; the
+ * next ledger write projects the ledger value into the meta, findings 14
+ * and 15 of #6983). A negative location 0 of a location-tracked product
+ * stays a violation, with a hint to count the product's locations: in
+ * shadow mode that count is recorded per location and clears it.
  *
  * Guarantees: it only reads; it repairs nothing.
  * Not guaranteed: a consistent snapshot. It takes no locks, so a write that
@@ -55,7 +60,8 @@ final class Xophz_Compass_Bazaar_Stock_Audit {
       self::duplicate_stock_rows(),
       self::negative_balances(),
       self::order_targets(),
-      self::cancelled_with_payments()
+      self::cancelled_with_payments(),
+      self::location_meta()
     );
     $violations = [];
     $notices    = [];
@@ -190,8 +196,37 @@ final class Xophz_Compass_Bazaar_Stock_Audit {
     $sql = 'SELECT stock_product_id, location_id, on_hand FROM ' . self::t( 'stock_balances' ) . ' WHERE on_hand <= %f ORDER BY stock_product_id, location_id';
     $notes = [ 'negative_balance' => '', 'negative_balance_backorder' => ' (backorders allowed)', 'negative_balance_untracked' => ' (the product was deleted or no longer manages stock)' ];
     foreach ( Xophz_Compass_Bazaar_Core_Db::get_results( $sql, [ -self::EPSILON ] ) as $row ) {
-      $type  = self::negative_type( Xophz_Compass_Bazaar_Stock_Factory::port()->product_info( (int) $row->stock_product_id ) );
-      $out[] = self::entry( $type, sprintf( 'Product %d location %d: on_hand %s%s.', $row->stock_product_id, $row->location_id, self::num( $row->on_hand ), $notes[ $type ] ), [ 'stock_product_id' => (int) $row->stock_product_id, 'location_id' => (int) $row->location_id, 'on_hand' => self::num( $row->on_hand ) ], 'negative_balance' !== $type );
+      $info  = Xophz_Compass_Bazaar_Stock_Factory::port()->product_info( (int) $row->stock_product_id );
+      $type  = self::negative_type( $info );
+      $hint  = 'negative_balance' === $type && 0 === (int) $row->location_id && ! empty( $info['location_tracked'] ) ? ' Sales nobody attributed to a location; count the product\'s locations to clear it.' : '';
+      $out[] = self::entry( $type, sprintf( 'Product %d location %d: on_hand %s%s.%s', $row->stock_product_id, $row->location_id, self::num( $row->on_hand ), $notes[ $type ], $hint ), [ 'stock_product_id' => (int) $row->stock_product_id, 'location_id' => (int) $row->location_id, 'on_hand' => self::num( $row->on_hand ) ], 'negative_balance' !== $type );
+    }
+    return $out;
+  }
+
+  /** Notice: multi-inventory entries whose quantity or flag differs from the ledger balance at that location. */
+  private static function location_meta(): array {
+    global $wpdb;
+    $b    = self::t( 'stock_balances' );
+    $rows = Xophz_Compass_Bazaar_Core_Db::get_results( "SELECT pm.post_id, pm.meta_value FROM {$wpdb->postmeta} pm WHERE pm.meta_key = %s AND pm.post_id IN (SELECT DISTINCT stock_product_id FROM $b) ORDER BY pm.post_id, pm.meta_id", [ Xophz_Compass_Bazaar_Stock_Locations::INVENTORY_META ] );
+    $seen = [];
+    $out  = [];
+    foreach ( $rows as $row ) {
+      $pid = (int) $row->post_id;
+      if ( isset( $seen[ $pid ] ) ) {
+        continue;
+      }
+      $seen[ $pid ] = true;
+      $ledger       = [];
+      foreach ( Xophz_Compass_Bazaar_Core_Db::get_results( "SELECT location_id, on_hand, is_enabled FROM $b WHERE stock_product_id = %d", [ $pid ] ) as $bal ) {
+        $ledger[ (int) $bal->location_id ] = [ (float) $bal->on_hand, (bool) (int) $bal->is_enabled ];
+      }
+      foreach ( Xophz_Compass_Bazaar_Stock_Locations::parse_entries( maybe_unserialize( $row->meta_value ) ) as $loc => $entry ) {
+        list( $on_hand, $enabled ) = $ledger[ $loc ] ?? [ 0.0, true ];
+        if ( Xophz_Compass_Bazaar_Stock_Planner::differs( $entry['qty'], $on_hand ) || $entry['enabled'] !== $enabled ) {
+          $out[] = self::entry( 'location_meta_drift', sprintf( 'Product %d location %d: the multi-inventory meta says %s%s, the ledger %s%s; the next ledger write projects the ledger value.', $pid, $loc, self::num( $entry['qty'] ), $entry['enabled'] ? '' : ' (disabled)', self::num( $on_hand ), $enabled ? '' : ' (disabled)' ), [ 'stock_product_id' => $pid, 'location_id' => $loc, 'meta' => self::num( $entry['qty'] ), 'ledger' => self::num( $on_hand ) ], true );
+        }
+      }
     }
     return $out;
   }

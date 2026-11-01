@@ -123,6 +123,59 @@ final class Xophz_Compass_Bazaar_Stock_Planner {
     return $entries;
   }
 
+  /**
+   * The lines (and location flags) that record an observed WooCommerce
+   * change for one product, so that afterwards the projectable sum equals
+   * $wc_value (findings 14 and 15 of #6983). By $attribution:
+   * - [] : the whole difference at location 0.
+   * - ['location' => L] : the whole difference at L when L is 0, or an
+   *   enabled entry of the product's multi-inventory meta whose balance is
+   *   enabled; otherwise at location 0. An observed order sale or restore
+   *   is booked where it was sold.
+   * - ['locations' => true] : the multi-inventory meta is the count (a
+   *   legacy location save): every meta location goes to its meta quantity
+   *   and flag, a ledger location missing from the meta goes to 0, and
+   *   location 0 takes the rest of $wc_value (opening_entries()).
+   *
+   * @param array   $balances "pid:loc" => row, locked; every known location of the product.
+   * @param array[] $meta     Stock_Wc_Port::initial_balances(): [loc, qty, enabled].
+   * @param array   $ids      product_id and variation_id for the lines.
+   * @return array ['lines' => Stock_Line[] (ascending loc), 'flags' => loc => bool, the is_enabled changes]
+   */
+  public static function reconcile_lines( int $pid, float $wc_value, array $balances, array $meta, array $attribution, array $ids ): array {
+    $lines = [];
+    $flags = [];
+    $have  = self::locations( $pid, $balances );
+    if ( empty( $attribution['locations'] ) ) {
+      $diff = Xophz_Compass_Bazaar_Stock_Line::qty( $wc_value - self::projectable_sum( $pid, $balances ) );
+      $loc  = (int) ( $attribution['location'] ?? 0 );
+      $ok   = false;
+      foreach ( $meta as $entry ) {
+        $ok = $ok || ( (int) $entry[0] === $loc && ! empty( $entry[2] ) );
+      }
+      $loc = $loc > 0 && $ok && ( $balances[ "$pid:$loc" ]['is_enabled'] ?? true ) ? $loc : 0;
+      if ( self::differs( $diff, 0.0 ) ) {
+        $lines[] = new Xophz_Compass_Bazaar_Stock_Line( $pid, $loc, $diff, $ids );
+      }
+      return [ 'lines' => $lines, 'flags' => $flags ];
+    }
+    $targets = self::opening_entries( $meta, $wc_value );
+    foreach ( array_keys( $have ) as $loc ) {
+      $targets += [ $loc => [ 'qty' => 0.0, 'enabled' => (bool) ( $balances[ "$pid:$loc" ]['is_enabled'] ?? true ) ] ];
+    }
+    ksort( $targets );
+    foreach ( $targets as $loc => $target ) {
+      if ( $loc > 0 && (bool) ( $balances[ "$pid:$loc" ]['is_enabled'] ?? true ) !== $target['enabled'] ) {
+        $flags[ $loc ] = $target['enabled'];
+      }
+      $delta = Xophz_Compass_Bazaar_Stock_Line::qty( $target['qty'] - ( $have[ $loc ] ?? 0.0 ) );
+      if ( self::differs( $delta, 0.0 ) ) {
+        $lines[] = new Xophz_Compass_Bazaar_Stock_Line( $pid, (int) $loc, $delta, $ids );
+      }
+    }
+    return [ 'lines' => $lines, 'flags' => $flags ];
+  }
+
   /** loc => on_hand for one product, ascending loc. */
   public static function locations( int $pid, array $balances ): array {
     $out = [];

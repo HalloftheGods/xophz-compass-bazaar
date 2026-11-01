@@ -18,6 +18,12 @@
 #   WooCommerce never reduces it; cancelling returns stock once; re-opening
 #   sells again; an admin refund with restock returns stock once; no item
 #   carries _reduced_stock; the audit finds nothing for the fixtures;
+# - locations (findings 14 and 15 of #6983): in shadow mode a legacy location
+#   count and a location disable are recorded per location, and a web order
+#   sold from a warehouse is booked at that warehouse, so location 0 never
+#   goes negative and the audit has no violation; in ledger mode a ledger
+#   sale projects the counted value into the meta, and a web order is booked
+#   at its warehouse, so that unit is not available there any more;
 # - ledger mode: an order completed, cancelled and then fully refunded has
 #   no order_target violation (the refunded target follows the last sync,
 #   finding 16 of #6983); a backorders product oversold to -2 is a notice,
@@ -133,6 +139,31 @@ expect 'shadow audit: no drift anywhere' "$out" 'shadow.audit.drift_anywhere=0'
 out="$(wp_cli bazaar stock verify)"
 expect 'cli verify (shadow): exits 0' "$out" 'exit=0'
 expect 'cli verify (shadow): no violations' "$out" 'Stock audit: no violations'
+
+# Locations: shadow then ledger
+out="$(fix seq_locations "${IDS[@]}")"
+EXTRA="$EXTRA,$(sed -n 's/^loc.L=//p' <<<"$out"),$(sed -n 's/^loc.WA=//p' <<<"$out"),$(sed -n 's/^loc.WB=//p' <<<"$out")"
+expect 'locations: opens at WA 5' "$out" 'loc.open.WA=5'
+expect 'locations: opens at WB 5' "$out" 'loc.open.WB=5'
+expect 'locations: opens at location 0 with 0' "$out" 'loc.open.L0=0'
+expect 'shadow count: _stock is the enabled total 13' "$out" 'loc.count.wc=13'
+expect 'shadow count: the ledger books it at WA' "$out" 'loc.count.WA=8'
+expect 'shadow count: location 0 untouched' "$out" 'loc.count.L0=0'
+expect 'shadow disable: _stock drops to 8' "$out" 'loc.disable.wc=8'
+expect 'shadow disable: WB keeps 5, disabled' "$out" 'loc.disable.WB=5 off'
+expect 'shadow disable: location 0 untouched' "$out" 'loc.disable.L0=0'
+expect 'shadow web order: WooCommerce reduces _stock' "$out" 'loc.web.wc=7'
+expect 'shadow web order: booked at WA' "$out" 'loc.web.WA=7'
+expect 'shadow web order: location 0 never goes negative' "$out" 'loc.web.L0=0'
+expect 'shadow audit: no violation for the product' "$out" 'loc.shadow.violations=[]'
+expect 'shadow audit: the meta WA that legacy never decremented is a notice' "$out" 'loc.shadow.notices=["location_meta_drift"]'
+expect 'ledger sale: WA 6' "$out" 'loc.ledger_sale.WA=6'
+expect 'ledger sale: the meta gets the counted value minus 1, not a stale balance' "$out" 'loc.ledger_sale.meta.WA=6'
+expect 'ledger sale: _stock 6' "$out" 'loc.ledger_sale.wc=6'
+expect 'ledger web order: booked at WA' "$out" 'loc.ledger_web.WA=5'
+expect 'ledger web order: location 0 untouched' "$out" 'loc.ledger_web.L0=0'
+expect 'ledger web order: that unit is not available at WA any more' "$out" 'loc.ledger_web.available_WA=5'
+expect 'ledger audit: no violation for the product' "$out" 'loc.ledger.violations=[]'
 
 # Ledger mode, a ledger-owned order
 out="$(fix seq_ledger "${IDS[@]}")"
