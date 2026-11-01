@@ -14,8 +14,9 @@
  *   second then fails on the unique key inside the commit and rolls back.
  * - Each tender is offered on this register and has an available provider
  *   (else 422 tender_unsupported), and passes the provider's precheck
- *   (refusals keep their own codes). A checkout whose key starts "legacy:"
- *   (the create_pos_order adapter, WP18) skips only the "offered" part: the
+ *   (refusals keep their own codes). A request the create_pos_order adapter
+ *   (WP18) marked legacy_trusted in code (a "legacy:" key sent over REST does
+ *   not count) skips only the "offered" part: the
  *   old handler accepted any WooCommerce gateway id, so the provider still has
  *   to be available and its precheck (for a digital tender, the one-time
  *   authorization token) still decides.
@@ -33,7 +34,7 @@ final class Xophz_Compass_Bazaar_Checkout_Tender_Plan {
       throw new Xophz_Compass_Bazaar_Core_Http_Error( 'tender_total_mismatch', 'The tenders do not add up to the total.', 422, [ 'total_minor' => $total, 'tendered_minor' => $req->tender_total_minor() ] );
     }
     self::check_uuids( $req->tenders );
-    $legacy  = 0 === strpos( (string) ( $row['client_key'] ?? '' ), 'legacy:' );
+    $legacy  = true === $req->legacy_trusted;
     $offered = array_column( Xophz_Compass_Bazaar_Payments_Registry::pos_tenders(), 'method_id' );
     $plan    = [];
     foreach ( $req->tenders as $i => $tender ) {

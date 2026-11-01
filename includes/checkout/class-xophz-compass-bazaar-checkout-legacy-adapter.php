@@ -63,6 +63,7 @@ class Xophz_Compass_Bazaar_Checkout_Legacy_Adapter {
         'cart'       => $cart,
         'tenders'    => $tenders,
       ] );
+      $request->legacy_trusted = true;
       $result = ( new Xophz_Compass_Bazaar_Checkout_Service() )->submit( $request, $context );
       return self::answer( (array) ( $result['body'] ?? [] ) );
     } catch ( Xophz_Compass_Bazaar_Core_Http_Error $e ) {

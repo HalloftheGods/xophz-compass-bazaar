@@ -60,6 +60,8 @@ check( 'offset time converted to UTC', $r->client_created_at, '2026-11-01 17:59:
 check( 'optional fields empty', [ $r->quote_hash, $r->expected_total_minor, $r->approval_tokens ], [ '', null, [] ] );
 $r = $C::from_array( $body( [ 'client_created_at' => null ] ) );
 check( 'no created_at is null', $r->client_created_at, null );
+check( 'legacy prefix in the body does not make the request trusted', $C::from_array( $body( [ 'client_key' => 'legacy:' . $key ] ) )->legacy_trusted, false );
+check( 'legacy prefix in the header does not make the request trusted', $C::from_array( $body( [ 'client_key' => '' ] ), 'legacy:' . $key )->legacy_trusted, false );
 check( 'legacy prefix accepted', $C::from_array( $body( [ 'client_key' => 'legacy:' . $key ] ) )->client_key, 'legacy:' . $key );
 
 // Idempotency-Key header alias.

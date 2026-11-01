@@ -51,6 +51,12 @@ final class Xophz_Compass_Bazaar_Checkout_Request {
   public $tenders = [];
   /** @var string[] */
   public $approval_tokens = [];
+  /**
+   * @var bool Set only in code, by the create_pos_order adapter; never read
+   *      from input, the client_key or the Idempotency-Key header. True skips
+   *      the tender plan's "offered on this register" check.
+   */
+  public $legacy_trusted = false;
 
   /** @var array[] {path, message} */
   private $errors = [];
