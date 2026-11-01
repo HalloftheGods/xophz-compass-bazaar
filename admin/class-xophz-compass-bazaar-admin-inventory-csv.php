@@ -1,0 +1,126 @@
+<?php
+/**
+ * Multi-inventory CSV export and import, moved out of
+ * Xophz_Compass_Bazaar_Admin_Multi_Inventory (which delegates to this class).
+ *
+ * Guarantees:
+ * - import() needs bazaar_manage_stock (PRO is not a check). Each row sets one
+ *   product location through Admin_Product_Stock::set_location_stock: in
+ *   ledger mode a set_count and set_enabled (reason count), else the meta and
+ *   an atomic WooCommerce set of the enabled total.
+ * - A row that cannot be applied is counted in `failed` and the import goes on.
+ *
+ * Not guaranteed: replay safety. The batch keys of an inventory import are
+ * random, so uploading the same file twice counts the locations twice (the
+ * second time the counts already match, so it changes nothing, unless stock
+ * moved in between).
+ *
+ * @package    Xophz_Compass_Bazaar
+ * @subpackage Xophz_Compass_Bazaar/admin
+ */
+class Xophz_Compass_Bazaar_Admin_Inventory_Csv {
+
+  /** Send the multi-inventory levels as a CSV download, then exit. */
+  public function export() {
+    $products = wc_get_products( [
+      'limit'  => -1,
+      'status' => 'publish',
+    ] );
+
+    header( 'Content-Type: text/csv; charset=utf-8' );
+    header( 'Content-Disposition: attachment; filename=compass_multi_inventory_' . date( 'Y-m-d' ) . '.csv' );
+
+    $output = fopen( 'php://output', 'w' );
+    fputcsv( $output, [ 'Product ID', 'SKU', 'Product Name', 'Location ID', 'Location Stock', 'Low Stock Threshold', 'Location Price' ] );
+
+    foreach ( $products as $product ) {
+      $pid         = $product->get_id();
+      $inventories = get_post_meta( $pid, '_compass_multi_inventory', true );
+      if ( is_array( $inventories ) && ! empty( $inventories ) ) {
+        foreach ( $inventories as $loc_id => $inv ) {
+          fputcsv( $output, [
+            $pid,
+            $inv['sku'] ?: $product->get_sku(),
+            $product->get_name(),
+            $loc_id,
+            $inv['stock_quantity'],
+            $inv['low_stock_threshold'],
+            $inv['price'] !== null ? $inv['price'] : $product->get_price(),
+          ] );
+        }
+      } else {
+        fputcsv( $output, [
+          $pid,
+          $product->get_sku(),
+          $product->get_name(),
+          'default',
+          $product->get_stock_quantity() ?: 0,
+          5,
+          $product->get_price(),
+        ] );
+      }
+    }
+
+    fclose( $output );
+    exit;
+  }
+
+  /** AJAX: import a CSV file (field `file`) to set location stock. */
+  public function import() {
+    if ( ! Xophz_Compass_Bazaar_Security_Guard::can_any( Xophz_Compass_Bazaar_Security_Capabilities::MANAGE_STOCK ) ) {
+      wp_send_json_error( [ 'message' => 'You do not have permission to manage stock.', 'code' => 'forbidden' ], 403 );
+    }
+
+    if ( empty( $_FILES['file']['tmp_name'] ) ) {
+      wp_send_json_error( [ 'message' => 'No CSV file uploaded.' ], 400 );
+    }
+
+    $handle = fopen( $_FILES['file']['tmp_name'], 'r' );
+    if ( ! $handle ) {
+      wp_send_json_error( [ 'message' => 'Failed to read uploaded CSV.' ], 500 );
+    }
+
+    fgetcsv( $handle );
+    $processed = 0;
+    $failed    = 0;
+    $errors    = [];
+
+    while ( ( $data = fgetcsv( $handle ) ) !== false ) {
+      if ( count( $data ) < 5 ) {
+        continue;
+      }
+      $product_id  = intval( $data[0] );
+      $location_id = intval( $data[3] );
+      if ( ! $product_id || ! $location_id ) {
+        continue;
+      }
+      try {
+        Xophz_Compass_Bazaar_Admin_Product_Stock::set_location_stock(
+          $product_id,
+          $location_id,
+          (float) intval( $data[4] ),
+          wp_generate_uuid4(),
+          [
+            'location_id'         => $location_id,
+            'low_stock_threshold' => isset( $data[5] ) ? intval( $data[5] ) : 5,
+            'sku'                 => isset( $data[1] ) ? sanitize_text_field( $data[1] ) : '',
+            'price'               => isset( $data[6] ) && $data[6] !== '' ? floatval( $data[6] ) : null,
+            'is_enabled'          => true,
+          ]
+        );
+        $processed++;
+      } catch ( \Throwable $e ) {
+        $failed++;
+        $errors[] = 'Product ' . $product_id . ', location ' . $location_id . ': ' . $e->getMessage();
+      }
+    }
+
+    fclose( $handle );
+    wp_send_json_success( [
+      'message'        => 'CSV imported successfully.',
+      'rows_processed' => $processed,
+      'failed'         => $failed,
+      'errors'         => $errors,
+    ] );
+  }
+}

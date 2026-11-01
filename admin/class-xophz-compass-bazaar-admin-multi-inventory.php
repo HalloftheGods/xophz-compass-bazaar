@@ -54,6 +54,16 @@ class Xophz_Compass_Bazaar_Admin_Multi_Inventory {
   }
 
   /**
+   * Refuse the request (403) unless the user holds bazaar_manage_stock. PRO
+   * status is not an authorization check: users can set it on themselves.
+   */
+  private function require_stock_permission() {
+    if ( ! Xophz_Compass_Bazaar_Security_Guard::can_any( Xophz_Compass_Bazaar_Security_Capabilities::MANAGE_STOCK ) ) {
+      wp_send_json_error( [ 'message' => 'You do not have permission to manage stock.', 'code' => 'forbidden' ], 403 );
+    }
+  }
+
+  /**
    * Register Custom Post Type for Warehouse/Store Inventory Locations.
    */
   public function registerLocationCpt() {
@@ -130,12 +140,10 @@ class Xophz_Compass_Bazaar_Admin_Multi_Inventory {
   }
 
   /**
-   * AJAX: Save or create an inventory location (PRO required).
+   * AJAX: Save or create an inventory location (needs bazaar_manage_stock).
    */
   public function saveInventoryLocation() {
-    if ( ! self::is_pro_user() ) {
-      wp_send_json_error( [ 'message' => 'PRO subscription required for multi-inventory features.' ], 403 );
-    }
+    $this->require_stock_permission();
 
     $id          = isset( $_POST['id'] ) ? intval( $_POST['id'] ) : 0;
     $title       = isset( $_POST['title'] ) ? sanitize_text_field( $_POST['title'] ) : '';
@@ -197,16 +205,19 @@ class Xophz_Compass_Bazaar_Admin_Multi_Inventory {
   }
 
   /**
-   * AJAX: Delete an inventory location (PRO required).
+   * AJAX: Delete an inventory location (needs bazaar_manage_stock). Refused
+   * with code location_has_stock while a ledger balance or a product's meta
+   * stock at the location is not 0.
    */
   public function deleteInventoryLocation() {
-    if ( ! self::is_pro_user() ) {
-      wp_send_json_error( [ 'message' => 'PRO subscription required.' ], 403 );
-    }
+    $this->require_stock_permission();
 
     $location_id = isset( $_POST['location_id'] ) ? intval( $_POST['location_id'] ) : 0;
     if ( ! $location_id ) {
       wp_send_json_error( [ 'message' => 'Invalid location ID.' ], 400 );
+    }
+    if ( Xophz_Compass_Bazaar_Admin_Product_Stock::location_has_stock( $location_id ) ) {
+      wp_send_json_error( [ 'message' => 'This location still holds stock. Move or count it to 0 first.', 'code' => 'location_has_stock' ], 409 );
     }
 
     $deleted = wp_delete_post( $location_id, true );
@@ -238,12 +249,12 @@ class Xophz_Compass_Bazaar_Admin_Multi_Inventory {
   }
 
   /**
-   * AJAX: Save multi-location stock for a product (PRO required).
+   * AJAX: Save multi-location stock for a product (needs bazaar_manage_stock).
+   * In ledger mode the quantities are counted through the ledger and the
+   * meta keeps sku, price, threshold and the enabled flag.
    */
   public function saveProductInventories() {
-    if ( ! self::is_pro_user() ) {
-      wp_send_json_error( [ 'message' => 'PRO subscription required.' ], 403 );
-    }
+    $this->require_stock_permission();
 
     $product_id = isset( $_POST['product_id'] ) ? intval( $_POST['product_id'] ) : 0;
     if ( ! $product_id ) {
@@ -260,7 +271,6 @@ class Xophz_Compass_Bazaar_Admin_Multi_Inventory {
     }
 
     $sanitized = [];
-    $total_stock = 0;
 
     foreach ( $raw_inventories as $loc_id => $data ) {
       $location_id = intval( $loc_id );
@@ -278,19 +288,14 @@ class Xophz_Compass_Bazaar_Admin_Multi_Inventory {
         'price'               => $price,
         'is_enabled'          => $is_enabled,
       ];
-
-      if ( $is_enabled ) {
-        $total_stock += $stock_qty;
-      }
     }
 
-    update_post_meta( $product_id, '_compass_multi_inventory', $sanitized );
-
-    // Sync cumulative total stock with standard WooCommerce stock
-    $product = wc_get_product( $product_id );
-    if ( $product && $product->get_manage_stock() ) {
-      $product->set_stock_quantity( $total_stock );
-      $product->save();
+    try {
+      $total_stock = Xophz_Compass_Bazaar_Admin_Product_Stock::save_inventories( $product_id, $sanitized );
+    } catch ( Xophz_Compass_Bazaar_Core_Http_Error $e ) {
+      wp_send_json_error( [ 'message' => $e->getMessage(), 'code' => $e->error_code() ], $e->status() );
+    } catch ( InvalidArgumentException $e ) {
+      wp_send_json_error( [ 'message' => $e->getMessage() ], 400 );
     }
 
     wp_send_json_success( [
@@ -300,12 +305,12 @@ class Xophz_Compass_Bazaar_Admin_Multi_Inventory {
   }
 
   /**
-   * AJAX: Bulk update inventory stock across multiple products (PRO required).
+   * AJAX: Bulk update inventory stock across multiple products (needs
+   * bazaar_manage_stock). Each update is its own count; one that fails is
+   * listed in `errors` and the rest go on.
    */
   public function bulkUpdateInventoryStock() {
-    if ( ! self::is_pro_user() ) {
-      wp_send_json_error( [ 'message' => 'PRO subscription required.' ], 403 );
-    }
+    $this->require_stock_permission();
 
     $raw_updates = isset( $_POST['updates'] ) ? $_POST['updates'] : [];
     if ( is_string( $raw_updates ) ) {
@@ -317,7 +322,9 @@ class Xophz_Compass_Bazaar_Admin_Multi_Inventory {
     }
 
     $updated_count = 0;
-    foreach ( $raw_updates as $item ) {
+    $errors        = [];
+    $uuid          = wp_generate_uuid4();
+    foreach ( $raw_updates as $index => $item ) {
       $product_id  = isset( $item['product_id'] ) ? intval( $item['product_id'] ) : 0;
       $location_id = isset( $item['location_id'] ) ? intval( $item['location_id'] ) : 0;
       $new_stock   = isset( $item['stock_quantity'] ) ? intval( $item['stock_quantity'] ) : 0;
@@ -326,44 +333,18 @@ class Xophz_Compass_Bazaar_Admin_Multi_Inventory {
         continue;
       }
 
-      $inventories = get_post_meta( $product_id, '_compass_multi_inventory', true );
-      if ( ! is_array( $inventories ) ) {
-        $inventories = [];
+      try {
+        Xophz_Compass_Bazaar_Admin_Product_Stock::set_location_stock( $product_id, $location_id, (float) $new_stock, substr( $uuid, 0, 36 ) . '-' . intval( $index ) );
+        $updated_count++;
+      } catch ( \Throwable $e ) {
+        $errors[] = 'Product ' . $product_id . ', location ' . $location_id . ': ' . $e->getMessage();
       }
-
-      if ( ! isset( $inventories[ $location_id ] ) ) {
-        $inventories[ $location_id ] = [
-          'location_id'         => $location_id,
-          'stock_quantity'      => 0,
-          'low_stock_threshold' => 5,
-          'sku'                 => '',
-          'price'               => null,
-          'is_enabled'          => true,
-        ];
-      }
-
-      $inventories[ $location_id ]['stock_quantity'] = $new_stock;
-      update_post_meta( $product_id, '_compass_multi_inventory', $inventories );
-
-      // Sync cumulative stock to WC Product
-      $total_stock = 0;
-      foreach ( $inventories as $inv ) {
-        if ( ! empty( $inv['is_enabled'] ) ) {
-          $total_stock += intval( $inv['stock_quantity'] );
-        }
-      }
-      $product = wc_get_product( $product_id );
-      if ( $product && $product->get_manage_stock() ) {
-        $product->set_stock_quantity( $total_stock );
-        $product->save();
-      }
-
-      $updated_count++;
     }
 
     wp_send_json_success( [
       'message'       => 'Bulk stock updated.',
       'updated_count' => $updated_count,
+      'errors'        => $errors,
     ] );
   }
 
@@ -371,129 +352,23 @@ class Xophz_Compass_Bazaar_Admin_Multi_Inventory {
    * AJAX: Export multi-inventory levels as CSV.
    */
   public function exportInventoryCsv() {
-    $is_pro = self::is_pro_user();
-
-    $products = wc_get_products( [
-      'limit'  => -1,
-      'status' => 'publish',
-    ] );
-
-    header( 'Content-Type: text/csv; charset=utf-8' );
-    header( 'Content-Disposition: attachment; filename=compass_multi_inventory_' . date( 'Y-m-d' ) . '.csv' );
-
-    $output = fopen( 'php://output', 'w' );
-    fputcsv( $output, [ 'Product ID', 'SKU', 'Product Name', 'Location ID', 'Location Stock', 'Low Stock Threshold', 'Location Price' ] );
-
-    foreach ( $products as $product ) {
-      $pid = $product->get_id();
-      $inventories = get_post_meta( $pid, '_compass_multi_inventory', true );
-      if ( is_array( $inventories ) && ! empty( $inventories ) ) {
-        foreach ( $inventories as $loc_id => $inv ) {
-          fputcsv( $output, [
-            $pid,
-            $inv['sku'] ?: $product->get_sku(),
-            $product->get_name(),
-            $loc_id,
-            $inv['stock_quantity'],
-            $inv['low_stock_threshold'],
-            $inv['price'] !== null ? $inv['price'] : $product->get_price(),
-          ] );
-        }
-      } else {
-        fputcsv( $output, [
-          $pid,
-          $product->get_sku(),
-          $product->get_name(),
-          'default',
-          $product->get_stock_quantity() ?: 0,
-          5,
-          $product->get_price(),
-        ] );
-      }
-    }
-
-    fclose( $output );
-    exit;
+    ( new Xophz_Compass_Bazaar_Admin_Inventory_Csv() )->export();
   }
 
   /**
-   * AJAX: Import CSV to update location stock (PRO required).
+   * AJAX: Import CSV to update location stock (needs bazaar_manage_stock).
    */
   public function importInventoryCsv() {
-    if ( ! self::is_pro_user() ) {
-      wp_send_json_error( [ 'message' => 'PRO subscription required.' ], 403 );
-    }
-
-    if ( empty( $_FILES['file']['tmp_name'] ) ) {
-      wp_send_json_error( [ 'message' => 'No CSV file uploaded.' ], 400 );
-    }
-
-    $handle = fopen( $_FILES['file']['tmp_name'], 'r' );
-    if ( ! $handle ) {
-      wp_send_json_error( [ 'message' => 'Failed to read uploaded CSV.' ], 500 );
-    }
-
-    $header = fgetcsv( $handle );
-    $rows_processed = 0;
-
-    while ( ( $data = fgetcsv( $handle ) ) !== false ) {
-      if ( count( $data ) < 5 ) {
-        continue;
-      }
-      $product_id  = intval( $data[0] );
-      $location_id = intval( $data[3] );
-      $stock_qty   = intval( $data[4] );
-      $low_thresh  = isset( $data[5] ) ? intval( $data[5] ) : 5;
-      $price       = isset( $data[6] ) && $data[6] !== '' ? floatval( $data[6] ) : null;
-
-      if ( ! $product_id || ! $location_id ) {
-        continue;
-      }
-
-      $inventories = get_post_meta( $product_id, '_compass_multi_inventory', true );
-      if ( ! is_array( $inventories ) ) {
-        $inventories = [];
-      }
-
-      $inventories[ $location_id ] = [
-        'location_id'         => $location_id,
-        'stock_quantity'      => $stock_qty,
-        'low_stock_threshold' => $low_thresh,
-        'sku'                 => isset( $data[1] ) ? sanitize_text_field( $data[1] ) : '',
-        'price'               => $price,
-        'is_enabled'          => true,
-      ];
-
-      update_post_meta( $product_id, '_compass_multi_inventory', $inventories );
-
-      // Sync cumulative stock to WC Product
-      $total_stock = 0;
-      foreach ( $inventories as $inv ) {
-        if ( ! empty( $inv['is_enabled'] ) ) {
-          $total_stock += intval( $inv['stock_quantity'] );
-        }
-      }
-      $product = wc_get_product( $product_id );
-      if ( $product && $product->get_manage_stock() ) {
-        $product->set_stock_quantity( $total_stock );
-        $product->save();
-      }
-
-      $rows_processed++;
-    }
-
-    fclose( $handle );
-    wp_send_json_success( [
-      'message'        => 'CSV imported successfully.',
-      'rows_processed' => $rows_processed,
-    ] );
+    ( new Xophz_Compass_Bazaar_Admin_Inventory_Csv() )->import();
   }
 
   /**
    * Hook into WooCommerce order stock reduction to deduct from specific location inventory.
+   * Dead code kept for now: it returns at once unless the stock mode is off
+   * (where it is the only location bookkeeping); deleting it awaits the user.
    */
   public function reduceLocationOrderStock( $order ) {
-    if ( ! $order ) {
+    if ( ! $order || Xophz_Compass_Bazaar_Stock_Mode::OFF !== Xophz_Compass_Bazaar_Stock_Mode::current() ) {
       return;
     }
 
