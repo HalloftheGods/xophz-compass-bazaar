@@ -146,8 +146,13 @@ class Xophz_Compass_Bazaar_Stock_Wc_Port_Wpdb implements Xophz_Compass_Bazaar_St
       function () use ( $pids ) {
         self::while_writing(
           function () use ( $pids ) {
+            // One product's failing listener must not skip the others' sync.
             foreach ( $pids as $pid ) {
-              self::sync_product( $pid );
+              try {
+                self::sync_product( $pid );
+              } catch ( Throwable $e ) {
+                error_log( 'Bazaar after_commit sync_product ' . $pid . ': ' . get_class( $e ) . ': ' . $e->getMessage() );
+              }
             }
           }
         );
