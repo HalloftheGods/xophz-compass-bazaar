@@ -2,9 +2,20 @@
 /**
  * POS shift summary email handler.
  *
- * Split out of Admin_Orders (#6946). The action name is unchanged. The figures
- * in the email are the ones the register sends; the server does not recompute
- * them (the server-side shift summary arrives with the payments repository).
+ * Split out of Admin_Orders (#6946). The action name is unchanged.
+ *
+ * Guaranteed: the figures in the email come from the server
+ * (Rest_Checkouts::summary, the same numbers as GET /pos/shift-summary):
+ * the current staff session, or, without one, everything since local
+ * midnight in the store's time zone. Totals the register sends (cash, card,
+ * coupons, customDiscounts, totalTips, totalOrders) are not read. Without
+ * bazaar_view_reports or bazaar_manage_orders the figures are the acting
+ * cashier's own.
+ *
+ * Not guaranteed: it reports what the checkout and payment rows say; it does
+ * not reconcile a cash drawer. Coupons and custom discounts are one
+ * "Discounts" figure. The register's cashierId, if it names another user with
+ * an email address, still adds that address to the recipients.
  *
  * @package    Xophz_Compass_Bazaar
  * @subpackage Xophz_Compass_Bazaar/admin
@@ -34,6 +45,27 @@ class Xophz_Compass_Bazaar_Admin_Pos_Shift {
     Xophz_Compass::output_json( $payload );
   }
 
+  /** The summary scope: the staff session, else today since local midnight. */
+  public static function scope( Xophz_Compass_Bazaar_Security_Context $ctx, bool $sees_all ): array {
+    if ( $ctx->staff_session_id > 0 ) {
+      $scope = [ 'staff_session_id' => $ctx->staff_session_id ];
+    } else {
+      $zone  = function_exists( 'wp_timezone' ) ? wp_timezone() : new DateTimeZone( 'UTC' );
+      $scope = [
+        'from' => ( new DateTimeImmutable( 'today', $zone ) )->setTimezone( new DateTimeZone( 'UTC' ) )->format( 'Y-m-d H:i:s' ),
+        'to'   => gmdate( 'Y-m-d H:i:s', time() + 1 ),
+      ];
+    }
+    if ( ! $sees_all ) {
+      $scope['cashier_user_id'] = $ctx->acting_user_id;
+    }
+    return $scope;
+  }
+
+  private static function money( int $minor ): string {
+    return number_format( (float) Xophz_Compass_Bazaar_Core_Money::from_minor( $minor ), 2 );
+  }
+
   public function emailShiftSummary() {
     try {
       if ( ! Xophz_Compass_Bazaar_Security_Guard::can_any( 'bazaar_sell' ) ) {
@@ -47,13 +79,20 @@ class Xophz_Compass_Bazaar_Admin_Pos_Shift {
         return;
       }
 
-      $cash            = isset( $args->cash ) ? floatval( $args->cash ) : 0;
-      $card            = isset( $args->card ) ? floatval( $args->card ) : 0;
-      $coupons         = isset( $args->coupons ) ? floatval( $args->coupons ) : 0;
-      $customDiscounts = isset( $args->customDiscounts ) ? floatval( $args->customDiscounts ) : 0;
-      $totalTips       = isset( $args->totalTips ) ? floatval( $args->totalTips ) : 0;
-      $totalOrders     = isset( $args->totalOrders ) ? intval( $args->totalOrders ) : 0;
-      $totalSales      = $cash + $card;
+      $caps     = 'Xophz_Compass_Bazaar_Security_Capabilities';
+      $sees_all = Xophz_Compass_Bazaar_Security_Guard::can_any( $caps::VIEW_REPORTS, $caps::MANAGE_ORDERS );
+      $summary  = Xophz_Compass_Bazaar_Rest_Checkouts::summary( self::scope( Xophz_Compass_Bazaar_Security_Guard::context(), $sees_all ) );
+
+      $cash = 0;
+      $card = 0;
+      foreach ( $summary['by_kind'] as $row ) {
+        if ( 'cash' === $row['kind'] ) {
+          $cash += (int) $row['amount_minor'];
+        } else {
+          $card += (int) $row['amount_minor'];
+        }
+      }
+      $totalOrders = (int) $summary['orders'];
 
       $site_name = get_bloginfo( 'name' );
       $site_html = esc_html( $site_name );
@@ -66,16 +105,16 @@ class Xophz_Compass_Bazaar_Admin_Pos_Shift {
           <hr style='border: none; border-top: 1px solid #eaeaea; margin: 20px 0;'>
           <table style='width: 100%; border-collapse: collapse;'>
               <tr><td style='padding: 8px 0; color: #555;'>Total Orders:</td><td style='text-align: right; font-weight: bold;'>$totalOrders</td></tr>
-              <tr><td style='padding: 8px 0; color: #555;'>Cash Tended:</td><td style='text-align: right; font-weight: bold; color: #28a745;'>$" . number_format( $cash, 2 ) . "</td></tr>
-              <tr><td style='padding: 8px 0; color: #555;'>Card/Electronic:</td><td style='text-align: right; font-weight: bold; color: #007bff;'>$" . number_format( $card, 2 ) . "</td></tr>
-              <tr><td style='padding: 8px 0; color: #555;'>Tips Collected:</td><td style='text-align: right; font-weight: bold; color: #20c997;'>+$" . number_format( $totalTips, 2 ) . "</td></tr>
-              <tr><td style='padding: 8px 0; color: #555;'>Coupons Applied:</td><td style='text-align: right; font-weight: bold; color: #ffc107;'>-$" . number_format( $coupons, 2 ) . "</td></tr>
-              <tr><td style='padding: 8px 0; color: #555;'>Custom Discounts:</td><td style='text-align: right; font-weight: bold; color: #ffc107;'>-$" . number_format( $customDiscounts, 2 ) . "</td></tr>
+              <tr><td style='padding: 8px 0; color: #555;'>Cash Tended:</td><td style='text-align: right; font-weight: bold; color: #28a745;'>$" . self::money( $cash ) . "</td></tr>
+              <tr><td style='padding: 8px 0; color: #555;'>Card/Electronic:</td><td style='text-align: right; font-weight: bold; color: #007bff;'>$" . self::money( $card ) . "</td></tr>
+              <tr><td style='padding: 8px 0; color: #555;'>Tips Collected:</td><td style='text-align: right; font-weight: bold; color: #20c997;'>+$" . self::money( (int) $summary['tips_minor'] ) . "</td></tr>
+              <tr><td style='padding: 8px 0; color: #555;'>Discounts (coupons and custom):</td><td style='text-align: right; font-weight: bold; color: #ffc107;'>-$" . self::money( (int) $summary['discounts_minor'] ) . "</td></tr>
+              <tr><td style='padding: 8px 0; color: #555;'>Refunds:</td><td style='text-align: right; font-weight: bold; color: #dc3545;'>-$" . self::money( (int) $summary['refunds_minor'] ) . "</td></tr>
           </table>
           <hr style='border: none; border-top: 1px solid #eaeaea; margin: 20px 0;'>
           <div style='display: flex; justify-content: space-between; font-size: 18px; font-weight: bold;'>
               <span>Total Shift Sales:</span>
-              <span>$" . number_format( $totalSales, 2 ) . "</span>
+              <span>$" . self::money( (int) $summary['gross_minor'] ) . "</span>
           </div>
       </div>
       ";
