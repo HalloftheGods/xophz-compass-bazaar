@@ -14,8 +14,9 @@
 # after_commit answers finalize_pending and the same-key retry completes it
 # with no duplicate movement or payment); a crashed order_created row on
 # same-key retry (checkout_interrupted) and in the sweeper; the sweeper
-# finalizing a committed row and failing a stuck received row; reads,
-# permissions, the disabled switch and the shift summary.
+# finalizing a committed row and failing a stuck received row; staff never
+# attached as the customer and create_account; reads, permissions, the
+# disabled switch and the shift summary.
 #
 # Taxes, ledger mode and failure points are switched on inside the wp-cli
 # processes this script starts; the store's options are not changed, except
@@ -96,6 +97,8 @@ expect_equal 'after_commit retry: completed, still one movement and one payment'
 expect_equal 'crash: live lease is in progress; expired retry is checkout_interrupted and cancels' "$(check_line crash_retry)" 'checkout_in_progress 409 checkout_interrupted cancelled cancelled'
 expect_equal 'sweeper: finalizes committed, cancels order_created, fails received (retryable)' "$(check_line sweeper)" 'completed cancelled failed 1 cancelled completed counted'
 expect_equal 'sweeper: recurring action is scheduled' "$(check_line sweeper_scheduled)" 'action_scheduler'
+expect_equal 'customer: a staff account id is not attached to the sale' "$(check_line customer_staff)" '200 0'
+expect_equal 'customer: create_account attaches a new customer with the opt-in' "$(check_line customer_create)" '200 attached customer yes done'
 expect_equal 'GET: own key, other cashier 404, subscriber 403' "$(check_line status_get)" '200 completed 404 checkout_not_found 403'
 expect_equal 'GET: a failed row shows its state and error' "$(check_line status_failed)" '200 failed checkout_interrupted'
 expect_equal 'POST: logged out 401, subscriber 403' "$(check_line permissions)" '401 rest_not_logged_in 403 forbidden'
@@ -108,5 +111,7 @@ teardown
 trap - EXIT
 out="$(wp_eval 'global $wpdb; $keys = array_filter(explode(",", "'"$KEYS"'")); $in = $keys ? "\"" . implode("\",\"", array_map("esc_sql", $keys)) . "\"" : "\"\""; echo "checkouts=" . (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->prefix}bazaar_checkouts WHERE client_key IN ($in)"); echo " products=" . (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = \"product\" AND post_title LIKE \"Bazaar checkout-v2 %\""); echo in_array("bazaar-co-test", WC_Tax::get_tax_class_slugs(), true) ? " class-left" : " class-gone";')"
 expect_equal 'teardown: checkouts, products and tax class are gone' "$out" 'checkouts=0 products=0 class-gone'
+out="$(wp_eval 'global $wpdb; echo (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->users} WHERE user_email LIKE \"bz-co-new-%@example.test\" OR user_login LIKE \"bz-co-%\"");')"
+expect_equal 'teardown: test users are gone' "$out" '0'
 
 bz_finish

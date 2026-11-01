@@ -196,6 +196,11 @@ if ( ! function_exists( 'bz_co_rest' ) ) {
     foreach ( (array) get_option( 'bazaar_checkout_v2_test_keys', [] ) as $key ) {
       foreach ( $wpdb->get_results( $wpdb->prepare( 'SELECT id, order_id FROM ' . $t( 'checkouts' ) . ' WHERE client_key = %s', $key ) ) as $row ) {
         $order = $row->order_id ? wc_get_order( (int) $row->order_id ) : null;
+        $buyer = $order ? get_user_by( 'id', $order->get_customer_id() ) : null;
+        if ( $buyer && 0 === strpos( $buyer->user_email, 'bz-co-new-' ) && '@example.test' === substr( $buyer->user_email, -13 ) ) {
+          require_once ABSPATH . 'wp-admin/includes/user.php';
+          wp_delete_user( (int) $buyer->ID );
+        }
         if ( $order ) {
           $order->delete( false );
           $order->delete( true );
@@ -384,6 +389,16 @@ if ( ! function_exists( 'bz_co_run' ) ) {
     $so     = $sweep_crash ? bz_co_order( (int) $sweep_crash['order_id'] ) : null;
     bz_co_say( 'sweeper', implode( ' ', array_merge( $after, [ $so ? $so->get_status() : 'no-order', bz_co_order( (int) bz_co_row( $key )['order_id'] )->get_status(), $counts['finalized'] >= 1 && $counts['cancelled'] >= 1 && $counts['failed'] >= 1 ? 'counted' : wp_json_encode( $counts ) ] ) ) );
     bz_co_say( 'sweeper_scheduled', Xophz_Compass_Bazaar_Checkout_Sweeper::ensure_scheduled() );
+
+    // Customers: staff are never attached; create_account attaches a new customer with opt-ins.
+    $r = bz_co_post( bz_co_body( bz_co_key(), $cart( [ $line( $A ) ], [ 'customer' => [ 'id' => $admin ] ] ), bz_co_cash( $T ) ) );
+    $o = bz_co_order( (int) ( $r['data']['order']['id'] ?? 0 ) );
+    bz_co_say( 'customer_staff', $r['status'] . ' ' . ( $o ? $o->get_customer_id() : '-' ) );
+    $email = 'bz-co-new-' . strtolower( wp_generate_password( 8, false ) ) . '@example.test';
+    $r     = bz_co_post( bz_co_body( bz_co_key(), $cart( [ $line( $A ) ], [ 'customer' => [ 'email' => $email, 'create_account' => true, 'marketing_opt_in' => true ] ] ), bz_co_cash( $T ) ) );
+    $o     = bz_co_order( (int) ( $r['data']['order']['id'] ?? 0 ) );
+    $u     = $o ? get_user_by( 'id', $o->get_customer_id() ) : null;
+    bz_co_say( 'customer_create', implode( ' ', [ $r['status'], $u && $u->user_email === $email ? 'attached' : 'none', $u && in_array( 'customer', (array) $u->roles, true ) ? 'customer' : '-', $o ? $o->get_meta( '_pos_marketing_optin' ) : '-', $o && $o->get_meta( '_bazaar_post_complete_done' ) ? 'done' : 'not-done' ] ) );
 
     // Reads and permissions.
     $own   = bz_co_rest( 'GET', '/bazaar/v1/pos/checkouts/' . $cash );

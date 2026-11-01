@@ -265,7 +265,11 @@ class Xophz_Compass_Bazaar_Checkout_Finalizer {
     }
   }
 
-  /** Attach the account with the billing email, or create one. Returns 0 when neither works. */
+  /**
+   * Attach the customer account with the billing email, or create one.
+   * Returns 0 when neither works, or when the email belongs to a user who is
+   * not a customer (a staff account is never attached).
+   */
   private function create_customer( WC_Order $order ): int {
     $email = (string) $order->get_billing_email();
     if ( '' === $email || ! function_exists( 'wc_create_new_customer' ) ) {
@@ -273,6 +277,9 @@ class Xophz_Compass_Bazaar_Checkout_Finalizer {
     }
     $existing = get_user_by( 'email', $email );
     $id       = $existing ? (int) $existing->ID : 0;
+    if ( $id && ! Xophz_Compass_Bazaar_Checkout_Order_Writer::is_customer( $id ) ) {
+      return 0;
+    }
     if ( ! $id ) {
       $new = wc_create_new_customer( $email, wc_create_new_customer_username( $email ), wp_generate_password( 24, true ) );
       if ( is_wp_error( $new ) ) {

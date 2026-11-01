@@ -216,13 +216,23 @@ class Xophz_Compass_Bazaar_Checkout_Order_Writer {
     throw new Xophz_Compass_Bazaar_Core_Http_Error( 'pricing_drift', 'The order total does not match the priced cart. Nothing was charged.', 422, [ 'expected' => $expected, 'actual' => $actual ] );
   }
 
-  /** An existing customer's billing fields, or the typed guest fields. */
+  /**
+   * True for a user who is a store customer (role customer, or the
+   * paying_customer meta), the same rule get_pos_customers uses. Staff
+   * accounts are never attached to a sale as its customer.
+   */
+  public static function is_customer( int $user_id ): bool {
+    $user = $user_id > 0 ? get_user_by( 'id', $user_id ) : null;
+    return $user && ( in_array( 'customer', (array) $user->roles, true ) || get_user_meta( $user_id, 'paying_customer', true ) );
+  }
+
+  /** An existing customer's billing fields (customers only, see is_customer), or the typed guest fields. */
   private function attach_customer( WC_Order $order, array $customer ): void {
     $id    = (int) ( $customer['id'] ?? 0 );
     $email = (string) ( $customer['email'] ?? '' );
     $phone = (string) ( $customer['phone'] ?? '' );
     $name  = (string) ( $customer['name'] ?? '' );
-    if ( $id > 0 && get_user_by( 'id', $id ) ) {
+    if ( self::is_customer( $id ) ) {
       $wc = new WC_Customer( $id );
       $order->set_customer_id( $id );
       $order->set_billing_first_name( $wc->get_billing_first_name() ?: ( $wc->get_first_name() ?: $name ) );
