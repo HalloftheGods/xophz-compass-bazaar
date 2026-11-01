@@ -38,9 +38,10 @@ expect 'installer: the install mutex is released' "$out" 'none'
 
 out="$(wp_eval "echo class_exists('${P}_Security_Capabilities') ? 'present' : 'absent';")"
 if [ "$out" = "present" ]; then
-  out="$(wp_eval 'foreach (["bazaar_cashier","bazaar_manager"] as $r) { echo $r . "=" . (get_role($r) ? "yes" : "no") . "\n"; }')"
+  out="$(wp_eval 'foreach (["bazaar_cashier","bazaar_supervisor","bazaar_stock_clerk"] as $r) { echo $r . "=" . (get_role($r) ? "yes" : "no") . "\n"; }')"
   expect 'roles: cashier role exists' "$out" 'bazaar_cashier=yes'
-  expect 'roles: manager role exists' "$out" 'bazaar_manager=yes'
+  expect 'roles: supervisor role exists' "$out" 'bazaar_supervisor=yes'
+  expect 'roles: stock clerk role exists' "$out" 'bazaar_stock_clerk=yes'
 else
   echo "SKIP roles: ${P}_Security_Capabilities is not part of this build"
 fi
