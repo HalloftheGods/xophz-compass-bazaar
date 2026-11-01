@@ -356,20 +356,17 @@ class Xophz_Compass_Bazaar_Checkout_Service {
   /**
    * A failure once the order may exist and before the commit: cancel the
    * order (never delete it) and the row, then throw. A row that is already
-   * committed or completed is never touched: its sale is paid.
+   * committed or completed is never touched: its sale is paid. With the lease
+   * lost, only an order the row never recorded is cancelled (cancel_orphan).
    */
   private function abort( array $row, ?WC_Order $order, Throwable $e, ?array $current = null ): void {
     $err     = self::as_http_error( $e );
     $current = $current ?? Xophz_Compass_Bazaar_Checkout_Repository::find( (int) $row['id'] ) ?? $row;
-    if ( in_array( $current['state'], [ Xophz_Compass_Bazaar_Checkout_State::COMMITTED, Xophz_Compass_Bazaar_Checkout_State::COMPLETED ], true ) ) {
-      // Committed under another lease (this one expired mid-way): the request that holds it finishes the sale.
-      self::throw_in_progress( true );
-    }
-    if ( ! empty( $err->data()['lease_lost'] ) ) {
-      // Another request owns the row now; only an order the row never recorded is ours to cancel.
-      if ( $order instanceof WC_Order && $order->get_id() && (int) ( $current['order_id'] ?? 0 ) !== (int) $order->get_id() ) {
-        $order->update_meta_data( '_bazaar_failure_code', 'checkout_in_progress' );
-        $order->update_status( 'cancelled', 'Bazaar POS checkout lost its lease before recording this order; the order was cancelled, not deleted.' );
+    $settled = in_array( $current['state'], [ Xophz_Compass_Bazaar_Checkout_State::COMMITTED, Xophz_Compass_Bazaar_Checkout_State::COMPLETED ], true );
+    if ( $settled || ! empty( $err->data()['lease_lost'] ) ) {
+      self::cancel_orphan( $order, $current );
+      if ( $settled ) {
+        self::throw_in_progress( true ); // Another lease committed it: that request finishes the sale.
       }
       throw $err;
     }
@@ -386,6 +383,15 @@ class Xophz_Compass_Bazaar_Checkout_Service {
       Xophz_Compass_Bazaar_Checkout_Repository::transition( $current, Xophz_Compass_Bazaar_Checkout_State::FAILED, self::error_changes( $err, true ) );
     }
     throw $err;
+  }
+
+  /** Cancel (never delete) an order this request saved that the row does not record, unless it is already cancelled. */
+  private static function cancel_orphan( ?WC_Order $order, array $current ): void {
+    if ( ! $order instanceof WC_Order || ! $order->get_id() || (int) ( $current['order_id'] ?? 0 ) === (int) $order->get_id() || 'cancelled' === $order->get_status() ) {
+      return;
+    }
+    $order->update_meta_data( '_bazaar_failure_code', 'checkout_in_progress' );
+    $order->update_status( 'cancelled', 'Bazaar POS checkout lost its lease before recording this order; the order was cancelled, not deleted.' );
   }
 
   /** Reversal for a committed row: release ledger stock and void each payment, in one transaction. */

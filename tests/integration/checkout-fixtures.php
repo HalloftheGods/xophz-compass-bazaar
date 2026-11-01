@@ -537,6 +537,40 @@ if ( ! function_exists( 'bz_co_run' ) ) {
     $want  = wc_stock_amount( $s0 ) . '&rarr;' . wc_stock_amount( $s0 - 1 );
     bz_co_say( 'stock_note', implode( ' ', [ (float) ( $rec['from'] ?? -1 ) === $s0 && (float) ( $rec['to'] ?? -1 ) === $s0 - 1 ? 'recorded' : wp_json_encode( [ $s0, $rec ] ), false !== strpos( $notes, $want ) || false !== strpos( $notes, html_entity_decode( $want ) ) ? 'note' : 'no-note', $s0 - bz_co_stock( $A ) ] ) );
     bz_co_ledger( false );
+
+    // A's lease lapses inside open() before its order is saved; same-key B finishes the sale; A then saves its order, which must end cancelled.
+    $key  = bz_co_key();
+    $body = bz_co_body( $key, $one, bz_co_cash( $T ) );
+    $nest = null;
+    $hold = function ( $o ) use ( $key, $body, &$nest ) {
+      $cid = (int) ( bz_co_row( $key )['id'] ?? -1 );
+      if ( null === $nest && $o instanceof WC_Order && ! $o->get_id() && (int) $o->get_meta( '_bazaar_checkout_id' ) === $cid ) {
+        $nest = [];
+        bz_co_expire( $cid );
+        $nest = bz_co_post( $body );
+      }
+    };
+    add_action( 'woocommerce_before_order_object_save', $hold );
+    $r = bz_co_post( $body );
+    remove_action( 'woocommerce_before_order_object_save', $hold );
+    $cid  = (int) bz_co_row( $key )['id'];
+    $mine = array_map( function ( $o ) { return $o->get_status(); }, wc_get_orders( [ 'limit' => -1, 'status' => 'any', 'meta_key' => '_bazaar_checkout_id', 'meta_value' => $cid ] ) );
+    sort( $mine );
+    bz_co_say( 'lease_lost_finished', implode( ' ', [ $r['status'], $r['data']['code'] ?? '-', $nest['status'] ?? '-', $nest['data']['state'] ?? '-', implode( ',', $mine ) ] ) );
+
+    // Recovery takes the expired lease and finalize throws: the lease it took is released, so the next retry completes at once.
+    $key = bz_co_key();
+    bz_co_fail( 'after_commit' );
+    bz_co_post( bz_co_body( $key, $one, bz_co_cash( $T ) ) );
+    bz_co_fail( '' );
+    $cid  = (int) bz_co_row( $key )['id'];
+    $boom = function ( $o ) use ( $cid ) { if ( $o instanceof WC_Order && (int) $o->get_meta( '_bazaar_checkout_id' ) === $cid ) { throw new Error( 'finalize down' ); } };
+    add_action( 'woocommerce_before_order_object_save', $boom );
+    $r = bz_co_post( bz_co_body( $key, $one, bz_co_cash( $T ) ) );
+    remove_action( 'woocommerce_before_order_object_save', $boom );
+    $mid  = bz_co_row( $key );
+    $done = bz_co_post( bz_co_body( $key, $one, bz_co_cash( $T ) ) );
+    bz_co_say( 'recover_release', implode( ' ', [ $r['status'], $r['data']['code'] ?? '-', $mid['state'], Xophz_Compass_Bazaar_Checkout_Repository::lease_live( $mid ) ? 'held' : 'released', $done['status'], $done['data']['state'] ?? ( $done['data']['code'] ?? '-' ) ] ) );
   }
 }
 

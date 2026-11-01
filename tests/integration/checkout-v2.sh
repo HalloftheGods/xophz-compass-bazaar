@@ -22,7 +22,10 @@
 # one tender of 0; an order cancelled by staff while its row waits in
 # committed stays cancelled; a held finalize lock makes a same-key retry wait
 # and answer 409 without taking the lease; transitions renew the lease; the
-# stock note uses the values recorded at the commit.
+# stock note uses the values recorded at the commit. Second review: a request
+# whose lease lapsed in open() while a same-key retry finished the sale cancels
+# its own unrecorded order; a recovery whose finalize throws releases the lease
+# it took.
 #
 # Taxes, ledger mode and failure points are switched on inside the wp-cli
 # processes this script starts; the store's options are not changed, except
@@ -119,6 +122,8 @@ expect_equal 'order cancelled while committed: 409 order_cancelled, stays cancel
 expect_equal 'finalize lock held elsewhere: retry waits, 409, lease kept; then completes once' "$(check_line finalize_locked)" '1 409 checkout_in_progress committed token-kept 200 completed 1 1'
 expect_equal 'lease: a transition renews it; a foreign token cannot' "$(check_line lease_renewal)" 'renewed foreign-refused'
 expect_equal 'stock note: from/to recorded at the commit, not at finalize' "$(check_line stock_note)" 'recorded note 2'
+expect_equal 'lease lost in open(), same-key retry finished: 409, its own order cancelled, the retry completed' "$(check_line lease_lost_finished)" '409 checkout_in_progress 200 completed cancelled,completed'
+expect_equal 'recovery finalize throws: 500 finalize_pending, taken lease released, next retry completes' "$(check_line recover_release)" '500 finalize_pending committed released 200 completed'
 
 KEYS="$(wp_eval 'echo implode(",", (array) get_option("bazaar_checkout_v2_test_keys", []));')"
 ORDER_IDS="$(wp_eval 'global $wpdb; $keys = (array) get_option("bazaar_checkout_v2_test_keys", []); $ids = []; foreach ($keys as $k) { $ids = array_merge($ids, $wpdb->get_col($wpdb->prepare("SELECT order_id FROM {$wpdb->prefix}bazaar_checkouts WHERE client_key = %s AND order_id IS NOT NULL", $k))); } echo implode(",", array_map("intval", $ids));')"
