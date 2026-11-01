@@ -66,6 +66,8 @@ done
 out="$(bz_wp checks)"
 check_line() { sed -n "s/^CHECK $1 //p" <<<"$out"; }
 expect 'quote: an unknown coupon is listed invalid with WooCommerce message' "$(check_line invalid_coupon)" '200 [false,"Coupon \"bz-tq-no-such-coupon\" cannot be applied because it does not exist."]'
+expect 'quote: a guest email at the per-customer coupon limit is refused with WooCommerce message' "$(check_line guest_limit_used)" '200 [false,0,"Usage limit for coupon '
+expect_equal 'quote: a guest email under the limit is accepted' "$(check_line guest_limit_fresh)" '200 [true]'
 expect_equal 'quote: price_override_minor is 422 unsupported_field' "$(check_line price_override)" '422 unsupported_field'
 expect_equal 'quote: no lines is 400 invalid_request with the path' "$(check_line bad_request)" '400 invalid_request ["lines"]'
 expect_equal 'quote: malformed JSON is refused by WordPress with 400' "$(check_line malformed_json)" '400 rest_invalid_json'

@@ -141,6 +141,11 @@ if ( ! function_exists( 'bz_base_location' ) ) {
     };
     $state['coupons']['percent']    = $coupon( 'bz-tq-pct-' . $suffix, 'percent', '15' );
     $state['coupons']['fixed_cart'] = $coupon( 'bz-tq-cart-' . $suffix, 'fixed_cart', '5.00' );
+    $state['coupons']['per_user']   = $coupon( 'bz-tq-ppu-' . $suffix, 'percent', '10' );
+    $per_user = new WC_Coupon( $state['coupons']['per_user']['id'] );
+    $per_user->set_usage_limit_per_user( 1 );
+    $per_user->save();
+    $per_user->get_data_store()->increase_usage_count( $per_user, 'guest-used@example.test' );
 
     $state['user'] = (int) wp_insert_user( [ 'user_login' => 'bz-tq-sub-' . $suffix, 'user_pass' => wp_generate_password( 24 ), 'role' => 'subscriber' ] );
     return $state;
@@ -320,6 +325,12 @@ if ( ! function_exists( 'bz_base_location' ) ) {
 
     $r = bz_rest( 'POST', '/bazaar/v1/pos/quote', [ 'lines' => [ $line ], 'coupons' => [ 'bz-tq-no-such-coupon' ] ] );
     $check( 'invalid_coupon', $r['status'] . ' ' . wp_json_encode( [ $r['data']['coupons'][0]['valid'] ?? null, $r['data']['coupons'][0]['message'] ?? '' ] ) );
+    // A guest whose email already used a one-per-customer coupon is refused, a new email is not.
+    $ppu = $state['coupons']['per_user']['code'];
+    $r   = bz_rest( 'POST', '/bazaar/v1/pos/quote', [ 'lines' => [ $line ], 'coupons' => [ $ppu ], 'customer' => [ 'email' => 'guest-used@example.test' ] ] );
+    $check( 'guest_limit_used', $r['status'] . ' ' . wp_json_encode( [ $r['data']['coupons'][0]['valid'] ?? null, (int) ( $r['data']['coupons'][0]['discount_minor'] ?? -1 ), $r['data']['coupons'][0]['message'] ?? '' ] ) );
+    $r = bz_rest( 'POST', '/bazaar/v1/pos/quote', [ 'lines' => [ $line ], 'coupons' => [ $ppu ], 'customer' => [ 'email' => 'guest-fresh@example.test' ] ] );
+    $check( 'guest_limit_fresh', $r['status'] . ' ' . wp_json_encode( [ $r['data']['coupons'][0]['valid'] ?? null ] ) );
     $r = bz_rest( 'POST', '/bazaar/v1/pos/quote', [ 'lines' => [ array_merge( $line, [ 'price_override_minor' => 1 ] ) ] ] );
     $check( 'price_override', $r['status'] . ' ' . ( $r['data']['code'] ?? '' ) );
     $r = bz_rest( 'POST', '/bazaar/v1/pos/quote', [ 'lines' => [] ] );

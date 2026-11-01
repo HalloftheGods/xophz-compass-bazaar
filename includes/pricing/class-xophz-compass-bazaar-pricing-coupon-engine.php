@@ -49,7 +49,7 @@ final class Xophz_Compass_Bazaar_Pricing_Coupon_Engine {
 
     $results = [];
     foreach ( $codes as $code ) {
-      $results[] = $this->apply_one( $discounts, $code );
+      $results[] = $this->apply_one( $discounts, $code, $customer );
     }
     $amounts = $discounts->get_discounts( true );
     foreach ( $results as &$result ) {
@@ -76,12 +76,17 @@ final class Xophz_Compass_Bazaar_Pricing_Coupon_Engine {
     ];
   }
 
-  private function apply_one( WC_Discounts $discounts, string $code ): array {
+  private function apply_one( WC_Discounts $discounts, string $code, array $customer ): array {
     $result = [ 'code' => $code, 'wc_code' => $code, 'valid' => false, 'message' => '', 'amount_minor' => 0 ];
     try {
       $coupon            = new WC_Coupon( $code );
       $result['wc_code'] = (string) $coupon->get_code();
-      $applied           = $discounts->apply_coupon( $coupon, true );
+      $guest_message     = $this->guest_limit_message( $coupon, $customer );
+      if ( '' !== $guest_message ) {
+        $result['message'] = $guest_message;
+        return $result;
+      }
+      $applied = $discounts->apply_coupon( $coupon, true );
     } catch ( Throwable $e ) {
       error_log( 'Bazaar coupon check failed for ' . $code . ': ' . get_class( $e ) . ': ' . $e->getMessage() );
       $result['message'] = __( 'This coupon could not be checked for this cart.', 'xophz-compass-bazaar' );
@@ -93,6 +98,25 @@ final class Xophz_Compass_Bazaar_Pricing_Coupon_Engine {
     }
     $result['valid'] = true;
     return $result;
+  }
+
+  /**
+   * WC_Discounts checks the per-customer limit only for a known customer id;
+   * WooCommerce checks a guest's billing email in WC_Abstract_Order::apply_coupon(),
+   * which this engine does not call. Same check here, run before the coupon is
+   * applied. Empty string: no refusal. Guarantee: guests with a valid billing
+   * email are checked by email; guests without one are not.
+   */
+  private function guest_limit_message( WC_Coupon $coupon, array $customer ): string {
+    $limit = (int) $coupon->get_usage_limit_per_user();
+    $email = strtolower( (string) ( $customer['email'] ?? '' ) );
+    if ( (int) ( $customer['id'] ?? 0 ) > 0 || $limit <= 0 || '' === $email || ! is_email( $email ) ) {
+      return '';
+    }
+    if ( $coupon->get_data_store()->get_usage_by_email( $coupon, $email ) >= $limit ) {
+      return self::plain( $coupon->get_coupon_error( WC_Coupon::E_WC_COUPON_USAGE_LIMIT_REACHED ) );
+    }
+    return '';
   }
 
   /** WooCommerce key line-<n> => our line key. */
