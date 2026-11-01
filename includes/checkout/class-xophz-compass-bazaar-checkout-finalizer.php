@@ -74,7 +74,16 @@ class Xophz_Compass_Bazaar_Checkout_Finalizer {
         return $current;
       }
       $held = $take ? Xophz_Compass_Bazaar_Checkout_Repository::take_expired( $current ) : Xophz_Compass_Bazaar_Checkout_Repository::renew_lease( $row );
-      return null === $held ? ( Xophz_Compass_Bazaar_Checkout_Repository::find( $id ) ?? $current ) : $this->finalize_held( $held );
+      if ( null === $held ) {
+        return Xophz_Compass_Bazaar_Checkout_Repository::find( $id ) ?? $current;
+      }
+      try {
+        return $this->finalize_held( $held );
+      } catch ( Throwable $e ) {
+        // Release the lease this call holds (take_expired gave it a new token the caller does not know), so a retry need not wait it out.
+        Xophz_Compass_Bazaar_Checkout_Repository::release_lease( $held );
+        throw $e;
+      }
     } finally {
       Xophz_Compass_Bazaar_Checkout_Repository::unlock_finalize( $id );
     }
@@ -83,21 +92,57 @@ class Xophz_Compass_Bazaar_Checkout_Finalizer {
   /**
    * Record, inside the commit transaction, each ledger line's _stock after
    * the sale (read under the commit's row locks) in _bazaar_stock_changes.
-   * Saved with save_meta_data(), so no order save hooks run in the transaction.
+   * _stock is read from the product that holds the stock
+   * (get_stock_managed_by_id: the parent for a variation whose parent
+   * manages stock), as the ledger applies it. Saved with save_meta_data(),
+   * so no order save hooks run in the transaction.
    */
   public static function record_stock_changes( WC_Order $order ): void {
     global $wpdb;
-    $changes = [];
+    $lines = [];
+    $after = [];
     foreach ( Xophz_Compass_Bazaar_Checkout_Order_Writer::stock_lines( $order ) as $line ) {
-      $pid = (int) ( $line['variation_id'] ?: $line['product_id'] );
-      $to  = Xophz_Compass_Bazaar_Core_Db::get_var( "SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = '_stock' LIMIT 1", [ $pid ] );
-      if ( null === $to || '' === (string) $to ) {
+      $pid     = (int) ( $line['variation_id'] ?: $line['product_id'] );
+      $product = wc_get_product( $pid );
+      $owner   = $product ? (int) $product->get_stock_managed_by_id() : $pid;
+      if ( ! array_key_exists( $owner, $after ) ) {
+        $after[ $owner ] = Xophz_Compass_Bazaar_Core_Db::get_var( "SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = '_stock' LIMIT 1", [ $owner ] );
+      }
+      $lines[] = [ 'product_id' => $pid, 'stock_id' => $owner, 'quantity' => (float) $line['quantity'] ];
+    }
+    $order->update_meta_data( '_bazaar_stock_changes', wp_json_encode( self::stock_steps( $lines, $after ) ) );
+    $order->save_meta_data();
+  }
+
+  /**
+   * Pure: from/to per line, given each stock holder's _stock after the whole
+   * sale. Lines that share a holder step through consecutive values in order
+   * (the first starts at after + the holder's total quantity). A holder whose
+   * _stock is null or '' (not managed) gives no entry.
+   *
+   * @param array[] $lines {product_id, stock_id, quantity} in order line order.
+   * @param array   $after stock_id => _stock after the sale.
+   * @return array[] {product_id, stock_id, from, to}
+   */
+  public static function stock_steps( array $lines, array $after ): array {
+    $level = [];
+    foreach ( $lines as $line ) {
+      $sid = (int) $line['stock_id'];
+      if ( isset( $after[ $sid ] ) && '' !== (string) $after[ $sid ] ) {
+        $level[ $sid ] = ( $level[ $sid ] ?? (float) $after[ $sid ] ) + (float) $line['quantity'];
+      }
+    }
+    $changes = [];
+    foreach ( $lines as $line ) {
+      $sid = (int) $line['stock_id'];
+      if ( ! isset( $level[ $sid ] ) ) {
         continue;
       }
-      $changes[] = [ 'product_id' => $pid, 'from' => (float) $to + (float) $line['quantity'], 'to' => (float) $to ];
+      $from          = $level[ $sid ];
+      $level[ $sid ] = $from - (float) $line['quantity'];
+      $changes[]     = [ 'product_id' => (int) $line['product_id'], 'stock_id' => $sid, 'from' => $from, 'to' => $level[ $sid ] ];
     }
-    $order->update_meta_data( '_bazaar_stock_changes', wp_json_encode( $changes ) );
-    $order->save_meta_data();
+    return $changes;
   }
 
   /** finalize() once the lock and the lease are held. */
