@@ -17,9 +17,10 @@
  *   pops it.
  * - woocommerce_can_restore_order_stock (when still true) pushes
  *   online_restore; woocommerce_restore_order_stock pops it.
- * - woocommerce_create_refund with restock_items, for an order that is not
- *   ledger-owned, pushes online_refund_restock; woocommerce_refund_created
- *   pops it.
+ * - woocommerce_can_restock_refunded_items (when still true and the order is
+ *   not ledger-owned) pushes online_refund_restock; woocommerce_refund_created
+ *   pops it. It runs after the gateway refund succeeded, so a failed refund
+ *   opens nothing.
  * A change seen with no context open is recorded as external, and the
  * outbox row stock.drift.detected is written in the same transaction.
  *
@@ -37,8 +38,8 @@
  *   and swallowed, so WooCommerce's own flow is never interrupted. The
  *   change then stays unrecorded until the next observed change or ledger
  *   write for that product records the difference.
- * - A context whose closing hook never fires (WooCommerce returned early, for
- *   example a failed refund) stays open until a later close of the same kind
+ * - A context whose closing hook never fires (WooCommerce returned early)
+ *   stays open until a later close of the same kind
  *   or the end of the request, and attributes changes seen meanwhile.
  *
  * @package Xophz_Compass_Bazaar
@@ -65,7 +66,7 @@ final class Xophz_Compass_Bazaar_Stock_Observer {
     add_action( 'woocommerce_reduce_order_stock', [ self::class, 'close_reduce' ], self::CONTEXT_PRIORITY, 0 );
     add_filter( 'woocommerce_can_restore_order_stock', [ self::class, 'open_restore' ], self::CONTEXT_PRIORITY, 2 );
     add_action( 'woocommerce_restore_order_stock', [ self::class, 'close_restore' ], self::CONTEXT_PRIORITY, 0 );
-    add_action( 'woocommerce_create_refund', [ self::class, 'open_refund' ], self::CONTEXT_PRIORITY, 2 );
+    add_filter( 'woocommerce_can_restock_refunded_items', [ self::class, 'open_refund' ], self::CONTEXT_PRIORITY, 3 );
     add_action( 'woocommerce_refund_created', [ self::class, 'close_refund' ], self::CONTEXT_PRIORITY, 0 );
   }
 
@@ -150,14 +151,16 @@ final class Xophz_Compass_Bazaar_Stock_Observer {
     self::close( 'restore' );
   }
 
-  /** woocommerce_create_refund( $refund, $args ) at PHP_INT_MAX. */
-  public static function open_refund( $refund, $args = [] ): void {
-    $args     = is_array( $args ) ? $args : [];
-    $order_id = (int) ( $args['order_id'] ?? 0 );
-    if ( empty( $args['restock_items'] ) || Xophz_Compass_Bazaar_Stock_Order_Lifecycle::is_ledger_owned( $order_id ) ) {
-      return;
+  /**
+   * woocommerce_can_restock_refunded_items at PHP_INT_MAX; returns $allowed
+   * unchanged. WooCommerce runs it inside wc_restock_refunded_items(), after
+   * the gateway refund succeeded, so a failed refund never opens a context.
+   */
+  public static function open_refund( $allowed, $order = null ) {
+    if ( $allowed && $order instanceof WC_Order && ! Xophz_Compass_Bazaar_Stock_Order_Lifecycle::is_ledger_owned( $order ) ) {
+      self::open( 'refund', 'online_refund_restock', [ 'type' => 'order', 'id' => $order->get_id() ] );
     }
-    self::open( 'refund', 'online_refund_restock', [ 'type' => 'order', 'id' => $order_id ] );
+    return $allowed;
   }
 
   public static function close_refund(): void {

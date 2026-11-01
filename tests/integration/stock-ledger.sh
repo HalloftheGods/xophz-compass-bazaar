@@ -162,7 +162,7 @@ expect 'ledger: no balance row opened for it' "$out" 'ledger.phantom.rows=0'
 expect 'shadow: adjustment answers 200' "$out" 'shadow.status=200'
 expect 'shadow: no ledger involved' "$out" 'shadow.ledger=false'
 expect 'shadow: _stock +2' "$out" 'shadow.wc=11'
-expect 'shadow: ledger balance untouched' "$out" 'shadow.bal0=9'
+expect 'shadow: observer records +2 as an observed batch' "$out" 'shadow.bal0=11'
 expect 'shadow: a warehouse adjustment is 422 unsupported_field' "$out" 'shadow.warehouse.code=unsupported_field'
 
 bz_finish

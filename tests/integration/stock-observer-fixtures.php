@@ -210,6 +210,15 @@ switch ( $env( 'FIX_ACTION' ) ) {
     $say( 'refund.order', $web2->get_id() );
     $say( 'refund.context_depth', Xophz_Compass_Bazaar_Stock_Context::depth() );
 
+    $web3 = $tagged_order( [ [ $ids['A'], 2 ] ], $run );
+    $web3->update_status( 'processing' );
+    $web3->set_payment_method( 'bazaar_no_such_gateway' );
+    $web3->save();
+    $item3   = array_key_first( $web3->get_items() );
+    $failed  = wc_create_refund( [ 'order_id' => $web3->get_id(), 'amount' => '3.00', 'reason' => "stock observer $run", 'line_items' => [ $item3 => [ 'qty' => 1, 'refund_total' => '3.00', 'refund_tax' => [] ] ], 'restock_items' => true, 'refund_payment' => true ] );
+    $say( 'refund.failed_is_error', is_wp_error( $failed ) );
+    $say( 'refund.failed_context_depth', Xophz_Compass_Bazaar_Stock_Context::depth() );
+
     wc_update_product_stock( wc_get_product( $ids['B'] ), 3, 'decrease' );
     $report( 'vault.B', $ids['B'] );
     $say( 'vault.drift_events', (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . $tbl( 'events' ) . " WHERE type = 'stock.drift.detected' AND aggregate_type = 'product' AND aggregate_id = %d", $ids['B'] ) ) );
