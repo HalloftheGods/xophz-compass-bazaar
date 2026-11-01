@@ -12,6 +12,14 @@
  *   caller must then stop without side effects.
  * - Lease times are computed by MySQL (UTC_TIMESTAMP()), so PHP and database
  *   clock skew cannot make a lease look expired early.
+ * - A transition to an in-flight state (priced, order_created, committed)
+ *   renews the lease to LEASE_SECONDS from now in the same UPDATE, and
+ *   renew_lease() renews it before a long step, so the 60 seconds count from
+ *   the last step, not from the claim.
+ * - lock_finalize() takes a MySQL named lock (GET_LOCK) per checkout, so two
+ *   finalizers of one row (a slow request and a same-key retry or the
+ *   sweeper) never run at once, even past an expired lease. The lock belongs
+ *   to the database connection and ends with it.
  * - find_by_key() is scoped to created_by; find_any_by_key() is not, and is
  *   for callers already checked for bazaar_manage_orders.
  * Not guaranteed: it opens no transaction and calls nothing outside the
@@ -137,6 +145,9 @@ class Xophz_Compass_Bazaar_Checkout_Repository {
     Xophz_Compass_Bazaar_Checkout_State::assert( (string) $row['state'], $to );
     $sets = [ 'state = %s', 'updated_at = %s' ];
     $args = [ $to, Xophz_Compass_Bazaar_Core_Db::now() ];
+    if ( in_array( $to, Xophz_Compass_Bazaar_Checkout_State::IN_FLIGHT, true ) ) {
+      $sets[] = 'lease_until = UTC_TIMESTAMP() + INTERVAL ' . self::LEASE_SECONDS . ' SECOND';
+    }
     foreach ( self::CHANGE_COLUMNS as $column => $cast ) {
       if ( ! array_key_exists( $column, $changes ) ) {
         continue;
@@ -198,6 +209,42 @@ class Xophz_Compass_Bazaar_Checkout_Repository {
       array_merge( [ self::new_token(), Xophz_Compass_Bazaar_Core_Db::now() ], $where_args )
     );
     return 1 === $n ? self::find( (int) $row['id'] ) : null;
+  }
+
+  /**
+   * Renew this request's lease to LEASE_SECONDS from now, keeping state and token.
+   *
+   * @return array|null The row with the new lease, or null when the lease was lost.
+   */
+  public static function renew_lease( array $row ): ?array {
+    list( $where, $where_args ) = self::owned( $row );
+    $n = Xophz_Compass_Bazaar_Core_Db::exec(
+      'UPDATE ' . self::table() . ' SET lease_until = UTC_TIMESTAMP() + INTERVAL ' . self::LEASE_SECONDS . " SECOND, updated_at = %s WHERE $where",
+      array_merge( [ Xophz_Compass_Bazaar_Core_Db::now() ], $where_args )
+    );
+    $now = self::find( (int) $row['id'] );
+    if ( 1 === $n ) {
+      return $now;
+    }
+    // MySQL counts changed rows: a renewal in the same second as the last one changes nothing but still holds.
+    $held = $now && (string) $now['state'] === (string) $row['state'] && (string) $now['lease_token'] === (string) ( $row['lease_token'] ?? '' );
+    return $held ? $now : null;
+  }
+
+  /** Take the finalize lock of checkout $id, waiting up to $wait seconds. True when this connection holds it. */
+  public static function lock_finalize( int $id, int $wait = 5 ): bool {
+    return '1' === (string) Xophz_Compass_Bazaar_Core_Db::get_var( 'SELECT GET_LOCK(%s, %d)', [ self::finalize_lock_name( $id ), max( 0, $wait ) ] );
+  }
+
+  public static function unlock_finalize( int $id ): void {
+    Xophz_Compass_Bazaar_Core_Db::get_var( 'SELECT RELEASE_LOCK(%s)', [ self::finalize_lock_name( $id ) ] );
+  }
+
+  /** Under MySQL's 64-character limit, and unique per database and table prefix. */
+  public static function finalize_lock_name( int $id ): string {
+    global $wpdb;
+    $db = defined( 'DB_NAME' ) ? (string) DB_NAME : '';
+    return 'bzco:' . substr( sha1( $db . '|' . ( isset( $wpdb->prefix ) ? (string) $wpdb->prefix : '' ) ), 0, 16 ) . ':' . $id;
   }
 
   /** End this request's lease early so a same-key retry or the sweeper can continue at once. */

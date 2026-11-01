@@ -87,7 +87,15 @@ check( 'errors: every path, cart paths prefixed', $paths( $e ), [
 ] );
 check( 'errors: a v4 uuid is required (v1 refused)', $paths( $fail( $body( [ 'client_key' => '5c1e2b9a-3f4d-1c2a-9b1e-0a1b2c3d4e5f' ] ) ) ), [ 'client_key' ] );
 check( 'errors: missing cart', $paths( $fail( $body( [ 'cart' => null ] ) ) ), [ 'cart' ] );
-check( 'errors: no tenders', $paths( $fail( $body( [ 'tenders' => [] ] ) ) ), [ 'tenders' ] );
+check( 'errors: tenders are required', $paths( $fail( $body( [ 'tenders' => null ] ) ) ), [ 'tenders' ] );
+
+// Zero-total sales (#6985): no tenders, or one tender of 0; a 0 beside other tenders is refused.
+check( 'zero total: an empty tender list parses', $C::from_array( $body( [ 'tenders' => [] ] ) )->tender_total_minor(), 0 );
+$zero = $C::from_array( $body( [ 'tenders' => [ [ 'method_id' => 'cash', 'amount_minor' => 0 ] ] ] ) );
+check( 'zero total: one tender of 0 parses', [ count( $zero->tenders ), $zero->tenders[0]->amount_minor, $zero->tender_total_minor() ], [ 1, 0, 0 ] );
+check( 'zero total: a 0 tender beside another is refused', $paths( $fail( $body( [ 'tenders' => [ [ 'method_id' => 'cash', 'amount_minor' => 0 ], [ 'method_id' => 'cash', 'amount_minor' => 5 ] ] ] ) ) ), [ 'tenders[0].amount_minor' ] );
+check( 'zero total: a negative single tender is still refused', $paths( $fail( $body( [ 'tenders' => [ [ 'method_id' => 'cash', 'amount_minor' => -1 ] ] ] ) ) ), [ 'tenders[0].amount_minor' ] );
+check( 'zero total: hash differs between no tender and a 0 tender', $C::from_array( $body( [ 'tenders' => [] ] ) )->request_hash() !== $zero->request_hash(), true );
 check( 'errors: tenders must be a list', $paths( $fail( $body( [ 'tenders' => [ 'a' => [ 'method_id' => 'cash', 'amount_minor' => 1 ] ] ] ) ) ), [ 'tenders' ] );
 check( 'errors: at most 10 tenders', $paths( $fail( $body( [ 'tenders' => array_fill( 0, 11, [ 'method_id' => 'cash', 'amount_minor' => 1 ] ) ] ) ) ), [ 'tenders' ] );
 check( 'errors: negative expected total', $paths( $fail( $body( [ 'expected_total_minor' => -1 ] ) ) ), [ 'expected_total_minor' ] );

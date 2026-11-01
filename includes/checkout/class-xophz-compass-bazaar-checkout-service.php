@@ -12,6 +12,10 @@
  *   unspent unless the token itself failed.
  * - A finalize failure leaves the row committed and answers 500
  *   finalize_pending; a same-key retry or the sweeper finishes it.
+ * - Once the commit transaction committed, the sale is never aborted or
+ *   cancelled by this request: after-commit callbacks are best effort
+ *   (Core_Db), and any later throw that finds the row committed under this
+ *   request's lease goes on to finalize (spec 11.4, step 8 throws).
  * Not guaranteed: a deadlock retry of the commit after the test-portal token
  * was spent refuses the token (it is a transient, outside the transaction).
  *
@@ -113,10 +117,16 @@ class Xophz_Compass_Bazaar_Checkout_Service {
     ];
   }
 
-  /** Finalize a committed row held under this request's lease. Returns the completed row, or null after logging a failure (the lease is released). */
-  public function resume( array $row ): ?array {
+  /**
+   * Finalize a committed row held under this request's lease, or with $take
+   * one whose lease expired (the sweeper). Returns the row as finalize left
+   * it (completed; cancelled when its order was closed meanwhile; still
+   * committed when another request holds it), or null after logging a
+   * failure (the lease is released).
+   */
+  public function resume( array $row, bool $take = false ): ?array {
     try {
-      return $this->finalizer->finalize( $row );
+      return $this->finalizer->finalize( $row, $take );
     } catch ( Throwable $e ) {
       error_log( 'Bazaar checkout ' . (int) $row['id'] . ' finalize failed: ' . $e->getMessage() );
       Xophz_Compass_Bazaar_Checkout_Repository::release_lease( $row );
@@ -176,8 +186,7 @@ class Xophz_Compass_Bazaar_Checkout_Service {
       self::throw_in_progress();
     }
     if ( $S::COMMITTED === $state ) {
-      $taken = Xophz_Compass_Bazaar_Checkout_Repository::take_expired( $row ) ?? self::throw_in_progress();
-      return [ 'response' => $this->finish( $taken ) ];
+      return [ 'response' => $this->finish( $row, true ) ];
     }
     if ( $S::ORDER_CREATED === $state ) {
       $taken = Xophz_Compass_Bazaar_Checkout_Repository::take_expired( $row ) ?? self::throw_in_progress();
@@ -202,7 +211,7 @@ class Xophz_Compass_Bazaar_Checkout_Service {
       }
       $approvals = $this->peek_approvals( $priced, $req, $ctx );
       $this->writer->precheck_stock( $priced, $owner );
-      $plan = $this->tender_plan( $req, $priced, $row, $ctx );
+      $plan = Xophz_Compass_Bazaar_Checkout_Tender_Plan::build( $req, $priced->total_minor(), $row, $ctx );
     } catch ( Throwable $e ) {
       $err = self::as_http_error( $e );
       Xophz_Compass_Bazaar_Checkout_Repository::transition( $row, Xophz_Compass_Bazaar_Checkout_State::FAILED, self::error_changes( $err, in_array( $err->error_code(), self::RETRYABLE, true ) ) );
@@ -228,7 +237,13 @@ class Xophz_Compass_Bazaar_Checkout_Service {
         return $this->commit( $row, $order, $plan, $approvals, $ctx );
       } );
     } catch ( Throwable $e ) {
-      $this->abort( $row, $order, $e );
+      $current = Xophz_Compass_Bazaar_Checkout_Repository::find( (int) $row['id'] );
+      if ( $current && Xophz_Compass_Bazaar_Checkout_State::COMMITTED === $current['state'] && (string) $current['lease_token'] === (string) $row['lease_token'] ) {
+        // The commit went through; only something after it threw. Never cancel a paid sale.
+        error_log( 'Bazaar checkout ' . (int) $row['id'] . ' threw after its commit: ' . get_class( $e ) . ': ' . $e->getMessage() );
+        return $this->finish( $current );
+      }
+      $this->abort( $row, $order, $e, $current );
     }
     return $this->finish( $row );
   }
@@ -247,6 +262,7 @@ class Xophz_Compass_Bazaar_Checkout_Service {
         'approval_id'      => $approvals ? (int) $approvals[0]['approval_id'] : null,
         'device_id'        => $ctx->device_id,
       ] ) );
+      Xophz_Compass_Bazaar_Checkout_Finalizer::record_stock_changes( $order );
     }
     $deferred = [];
     foreach ( $plan as $seq => $leg ) {
@@ -312,27 +328,43 @@ class Xophz_Compass_Bazaar_Checkout_Service {
     ] );
   }
 
-  /** Step 8, or 500 finalize_pending with the lease released. */
-  private function finish( array $row ): array {
+  /**
+   * Step 8, or 500 finalize_pending with the lease released. $take: recovery of
+   * an expired lease. A row the finalizer cancelled (order closed) answers its stored error.
+   */
+  private function finish( array $row, bool $take = false ): array {
     try {
       self::fail_at( 'after_commit' );
-      $done = $this->finalizer->finalize( $row );
+      $done = $this->finalizer->finalize( $row, $take );
     } catch ( Throwable $e ) {
+      if ( $e instanceof Xophz_Compass_Bazaar_Core_Http_Error && 'checkout_in_progress' === $e->error_code() ) {
+        throw $e;
+      }
       error_log( 'Bazaar checkout ' . (int) $row['id'] . ' finalize failed: ' . $e->getMessage() );
       Xophz_Compass_Bazaar_Checkout_Repository::release_lease( $row );
       throw new Xophz_Compass_Bazaar_Core_Http_Error( 'finalize_pending', 'The sale is recorded and paid, but finishing the order failed. Retry with the same client key.', 500, [ 'checkout_id' => (int) $row['id'], 'order_id' => (int) $row['order_id'] ] );
     }
+    if ( Xophz_Compass_Bazaar_Checkout_State::CANCELLED === $done['state'] ) {
+      return [ 'status' => (int) $done['response_status'] ?: 409, 'body' => Xophz_Compass_Bazaar_Checkout_Repository::response_body( $done ) ?? [] ];
+    }
     if ( Xophz_Compass_Bazaar_Checkout_State::COMPLETED !== $done['state'] ) {
       self::throw_in_progress();
     }
-    $body = Xophz_Compass_Bazaar_Checkout_Repository::response_body( $done ) ?? [];
-    return [ 'status' => 200, 'body' => $body ];
+    return [ 'status' => 200, 'body' => Xophz_Compass_Bazaar_Checkout_Repository::response_body( $done ) ?? [] ];
   }
 
-  /** A failure once the order may exist: cancel the order (never delete it) and the row, then throw. */
-  private function abort( array $row, ?WC_Order $order, Throwable $e ): void {
+  /**
+   * A failure once the order may exist and before the commit: cancel the
+   * order (never delete it) and the row, then throw. A row that is already
+   * committed or completed is never touched: its sale is paid.
+   */
+  private function abort( array $row, ?WC_Order $order, Throwable $e, ?array $current = null ): void {
     $err     = self::as_http_error( $e );
-    $current = Xophz_Compass_Bazaar_Checkout_Repository::find( (int) $row['id'] ) ?? $row;
+    $current = $current ?? Xophz_Compass_Bazaar_Checkout_Repository::find( (int) $row['id'] ) ?? $row;
+    if ( in_array( $current['state'], [ Xophz_Compass_Bazaar_Checkout_State::COMMITTED, Xophz_Compass_Bazaar_Checkout_State::COMPLETED ], true ) ) {
+      // Committed under another lease (this one expired mid-way): the request that holds it finishes the sale.
+      self::throw_in_progress( true );
+    }
     if ( ! empty( $err->data()['lease_lost'] ) ) {
       // Another request owns the row now; only an order the row never recorded is ours to cancel.
       if ( $order instanceof WC_Order && $order->get_id() && (int) ( $current['order_id'] ?? 0 ) !== (int) $order->get_id() ) {
@@ -372,44 +404,6 @@ class Xophz_Compass_Bazaar_Checkout_Service {
         Xophz_Compass_Bazaar_Payments_Repository::update_status( (int) $p->id, $status );
       }
     } );
-  }
-
-  /**
-   * Step 5: tenders sum to the total, each is offered on this register, has
-   * an available provider, and passes its precheck (read-only).
-   *
-   * @return array[] seq => {tender, provider, intent}
-   */
-  private function tender_plan( Xophz_Compass_Bazaar_Checkout_Request $req, Xophz_Compass_Bazaar_Pricing_Priced_Cart $priced, array $row, Xophz_Compass_Bazaar_Security_Context $ctx ): array {
-    $total = $priced->total_minor();
-    if ( $req->tender_total_minor() !== $total ) {
-      throw new Xophz_Compass_Bazaar_Core_Http_Error( 'tender_total_mismatch', 'The tenders do not add up to the total.', 422, [ 'total_minor' => $total, 'tendered_minor' => $req->tender_total_minor() ] );
-    }
-    $offered = array_column( Xophz_Compass_Bazaar_Payments_Registry::pos_tenders(), 'method_id' );
-    $plan    = [];
-    foreach ( $req->tenders as $i => $tender ) {
-      $title    = Xophz_Compass_Bazaar_Checkout_Finalizer::method_title( $tender->method_id );
-      $provider = in_array( $tender->method_id, $offered, true ) ? Xophz_Compass_Bazaar_Payments_Registry::for_method( $tender->method_id, $title ) : null;
-      if ( null === $provider ) {
-        throw new Xophz_Compass_Bazaar_Core_Http_Error( 'tender_unsupported', 'This payment method is not available on the register.', 422, [ 'tender' => $i, 'method_id' => $tender->method_id ] );
-      }
-      $intent = new Xophz_Compass_Bazaar_Payments_Intent( [
-        'checkout_id'      => (int) $row['id'],
-        'seq'              => $i + 1,
-        'amount_minor'     => $tender->amount_minor,
-        'currency'         => (string) $row['currency'],
-        'operator_user_id' => $ctx->operator_user_id,
-        'cashier_user_id'  => $ctx->acting_user_id,
-        'staff_session_id' => $ctx->staff_session_id,
-        'method_title'     => $title,
-      ] );
-      $check = $provider->precheck( $tender, $intent );
-      if ( $check->is_refused() ) {
-        throw new Xophz_Compass_Bazaar_Core_Http_Error( $check->code, $check->message, $check->http_status, array_merge( [ 'tender' => $i ], isset( $check->payload['reason'] ) ? [ 'reason' => $check->payload['reason'] ] : [] ) );
-      }
-      $plan[ $i + 1 ] = [ 'tender' => $tender, 'provider' => $provider, 'intent' => $intent ];
-    }
-    return $plan;
   }
 
   private function check_coupons( Xophz_Compass_Bazaar_Pricing_Priced_Cart $priced ): void {

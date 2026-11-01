@@ -30,9 +30,11 @@ final class Xophz_Compass_Bazaar_Payments_Tender {
   /**
    * Validate and build. Throws Core_Http_Error (422 tender_invalid, with
    * data.field) on the first invalid field. Checks shape only; whether a
-   * provider accepts the tender is the provider's precheck.
+   * provider accepts the tender is the provider's precheck. With $allow_zero
+   * amount_minor may be 0: the no-charge tender of a zero-total sale, which
+   * Checkout_Request allows only as the only tender.
    */
-  public static function from_array( array $in ): self {
+  public static function from_array( array $in, bool $allow_zero = false ): self {
     $t            = new self();
     $t->method_id = strtolower( trim( self::text( $in, 'method_id' ) ) );
     if ( '' === $t->method_id || strlen( $t->method_id ) > 100 || ! preg_match( '/^[a-z0-9_\-]+$/', $t->method_id ) ) {
@@ -40,8 +42,8 @@ final class Xophz_Compass_Bazaar_Payments_Tender {
     }
 
     $amount = self::int( $in['amount_minor'] ?? null );
-    if ( null === $amount || $amount <= 0 ) {
-      throw self::invalid( 'amount_minor', 'amount_minor must be a whole number above 0.' );
+    if ( null === $amount || $amount < 0 || ( 0 === $amount && ! $allow_zero ) ) {
+      throw self::invalid( 'amount_minor', $allow_zero ? 'amount_minor must be a whole number of 0 or more.' : 'amount_minor must be a whole number above 0.' );
     }
     $t->amount_minor = $amount;
 

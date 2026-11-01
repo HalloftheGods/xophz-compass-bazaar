@@ -448,6 +448,95 @@ if ( ! function_exists( 'bz_co_run' ) ) {
     bz_co_say( 'shift', $shift['status'] . ' ' . implode( ',', array_keys( (array) $shift['data'] ) ) . ' cashier=' . ( (int) ( $shift['data']['window']['cashier_user_id'] ?? 0 ) === (int) $s['cashier'] ? 'self' : 'other' ) );
     $admin_shift = bz_co_rest( 'GET', '/bazaar/v1/pos/shift-summary' );
     bz_co_say( 'shift_admin', $admin_shift['status'] . ' ' . ( (int) ( $admin_shift['data']['orders'] ?? 0 ) >= 5 && (int) ( $admin_shift['data']['gross_minor'] ?? 0 ) > 0 ? 'counted' : wp_json_encode( $admin_shift['data'] ) ) );
+    bz_co_run_fixes( $one, $T, $A, $admin, (string) ( Xophz_Compass_Bazaar_Payments_Repository::for_checkout( (int) bz_co_row( $cash )['id'] )[0]->payment_uuid ?? '' ) );
+  }
+
+  /** Review fixes #6985: after-commit throws, payment_uuid repeats, zero totals, closed orders, leases, stock notes. */
+  function bz_co_run_fixes( array $one, int $T, int $A, int $admin, string $used_uuid ): void {
+    global $wpdb;
+    $ct = Xophz_Compass_Bazaar_Core_Db::table( 'checkouts' );
+    bz_co_ledger( true );
+    // A listener throwing after COMMIT (outbox event and the stock sync) leaves the paid sale completed.
+    $boom = function () { throw new RuntimeException( 'listener down' ); };
+    add_action( 'xophz_compass_bazaar_event', $boom );
+    add_action( 'woocommerce_product_set_stock', $boom );
+    $stock = bz_co_stock( $A );
+    $r     = bz_co_post( bz_co_body( bz_co_key(), $one, bz_co_cash( $T ) ) );
+    remove_action( 'xophz_compass_bazaar_event', $boom );
+    remove_action( 'woocommerce_product_set_stock', $boom );
+    $oid = (int) ( $r['data']['order']['id'] ?? 0 );
+    bz_co_say( 'after_commit_listener', implode( ' ', [ $r['status'], $r['data']['state'] ?? ( $r['data']['code'] ?? '-' ), $oid ? bz_co_order( $oid )->get_status() : '-', bz_co_moves( $oid ), count( $r['data']['payments'] ?? [] ), $stock - bz_co_stock( $A ) ] ) );
+
+    // payment_uuid repeated in the request, or already stored: 422 before any order.
+    $before = bz_co_orders();
+    $u      = wp_generate_uuid4();
+    $half   = intdiv( $T, 2 );
+    $r      = bz_co_post( bz_co_body( bz_co_key(), $one, [ [ 'method_id' => 'cash', 'amount_minor' => $half, 'payment_uuid' => $u ], [ 'method_id' => 'cash', 'amount_minor' => $T - $half, 'payment_uuid' => $u ] ] ) );
+    $q      = bz_co_post( bz_co_body( bz_co_key(), $one, [ [ 'method_id' => 'cash', 'amount_minor' => $T, 'payment_uuid' => $used_uuid ] ] ) );
+    bz_co_say( 'uuid_repeat', implode( ' ', [ $r['status'], $r['data']['code'] ?? '-', $r['data']['data']['field'] ?? '-', $q['status'], $q['data']['code'] ?? '-', '' !== $used_uuid ? 'stored' : 'no-uuid', bz_co_orders() - $before ] ) );
+
+    // Zero-total sales: no tenders, or one tender of 0; a non-zero tender is a mismatch.
+    $free = [ 'lines' => [ [ 'type' => 'custom', 'name' => 'Comped item', 'unit_price_minor' => 0, 'quantity' => 1 ] ] ];
+    $zt   = (int) bz_co_quote( $free )['totals']['total_minor'];
+    $r    = bz_co_post( bz_co_body( bz_co_key(), $free, [] ) );
+    $q    = bz_co_post( bz_co_body( bz_co_key(), $free, [ [ 'method_id' => 'cash', 'amount_minor' => 0 ] ] ) );
+    $m    = bz_co_post( bz_co_body( bz_co_key(), $free, bz_co_cash( 1, 0 ) ) );
+    $zo   = bz_co_order( (int) ( $r['data']['order']['id'] ?? 0 ) );
+    bz_co_say( 'zero_total', implode( ' ', [ $zt, $r['status'], $zo ? $zo->get_status() : '-', count( $r['data']['payments'] ?? [ 'x' ] ), $zo ? $zo->get_payment_method_title() : '-', $q['status'], $q['data']['order']['status'] ?? '-', count( $q['data']['payments'] ?? [ 'x' ] ), $m['status'], $m['data']['code'] ?? '-' ] ) );
+
+    // Staff cancel the order while the row waits in committed: finalize keeps it cancelled and cancels the row.
+    $key   = bz_co_key();
+    $stock = bz_co_stock( $A );
+    bz_co_fail( 'after_commit' );
+    bz_co_post( bz_co_body( $key, $one, bz_co_cash( $T ) ) );
+    bz_co_fail( '' );
+    $row = bz_co_row( $key );
+    bz_co_order( (int) $row['order_id'] )->update_status( 'cancelled', 'Test: staff cancelled the pending order.' );
+    $r     = bz_co_post( bz_co_body( $key, $one, bz_co_cash( $T ) ) );
+    $again = bz_co_post( bz_co_body( $key, $one, bz_co_cash( $T ) ) );
+    bz_co_say( 'finalize_closed', implode( ' ', [ $r['status'], $r['data']['code'] ?? '-', bz_co_row( $key )['state'], bz_co_order( (int) $row['order_id'] )->get_status(), $stock - bz_co_stock( $A ), bz_co_payments( (int) $row['id'] ), var_export( $again['data']['data']['replayed'] ?? null, true ) ] ) );
+
+    // Another finalizer holds the row's lock (a second connection): a same-key retry waits, answers 409, takes no lease; then completes.
+    $key = bz_co_key();
+    bz_co_fail( 'after_commit' );
+    bz_co_post( bz_co_body( $key, $one, bz_co_cash( $T ) ) );
+    bz_co_fail( '' );
+    $row   = bz_co_row( $key );
+    $host  = $wpdb->parse_db_host( DB_HOST );
+    $other = mysqli_connect( $host[0], DB_USER, DB_PASSWORD, DB_NAME, $host[1] ? (int) $host[1] : 3306 );
+    $held  = $other ? mysqli_query( $other, "SELECT GET_LOCK('" . Xophz_Compass_Bazaar_Checkout_Repository::finalize_lock_name( (int) $row['id'] ) . "', 0)" )->fetch_row()[0] : '-';
+    $busy  = bz_co_post( bz_co_body( $key, $one, bz_co_cash( $T ) ) );
+    $mid   = bz_co_row( $key );
+    if ( $other ) {
+      mysqli_close( $other );
+    }
+    $done = bz_co_post( bz_co_body( $key, $one, bz_co_cash( $T ) ) );
+    bz_co_say( 'finalize_locked', implode( ' ', [ $held, $busy['status'], $busy['data']['code'] ?? '-', $mid['state'], $mid['lease_token'] === $row['lease_token'] ? 'token-kept' : 'token-taken', $done['status'], $done['data']['state'] ?? '-', bz_co_moves( (int) $row['order_id'] ), bz_co_payments( (int) $row['id'] ) ] ) );
+
+    // Every transition to an in-flight state renews the lease; renew_lease refuses a foreign token.
+    $lk = bz_co_key();
+    $lr = Xophz_Compass_Bazaar_Checkout_Repository::claim( [ 'client_key' => $lk, 'created_by' => $admin, 'request_hash' => str_repeat( '1', 64 ), 'operator_user_id' => $admin, 'cashier_user_id' => $admin, 'currency' => get_woocommerce_currency() ] )['row'];
+    $wpdb->query( $wpdb->prepare( "UPDATE $ct SET lease_until = UTC_TIMESTAMP() + INTERVAL 5 SECOND WHERE id = %d", (int) $lr['id'] ) );
+    $pr   = Xophz_Compass_Bazaar_Checkout_Repository::transition( Xophz_Compass_Bazaar_Checkout_Repository::find( (int) $lr['id'] ), Xophz_Compass_Bazaar_Checkout_State::PRICED );
+    $left = (int) $wpdb->get_var( $wpdb->prepare( "SELECT TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), lease_until) FROM $ct WHERE id = %d", (int) $lr['id'] ) );
+    $bad  = Xophz_Compass_Bazaar_Checkout_Repository::renew_lease( array_merge( $pr, [ 'lease_token' => 'not-mine' ] ) );
+    Xophz_Compass_Bazaar_Checkout_Repository::transition( $pr, Xophz_Compass_Bazaar_Checkout_State::FAILED, Xophz_Compass_Bazaar_Checkout_Service::error_changes( Xophz_Compass_Bazaar_Checkout_Service::interrupted(), false ) );
+    bz_co_say( 'lease_renewal', ( $left >= 55 ? 'renewed' : "left=$left" ) . ' ' . ( null === $bad ? 'foreign-refused' : 'foreign-renewed' ) );
+
+    // Stock note of a sale finalized after a later sale: from/to as of its own commit.
+    $s0 = bz_co_stock( $A );
+    $k1 = bz_co_key();
+    bz_co_fail( 'after_commit' );
+    bz_co_post( bz_co_body( $k1, $one, bz_co_cash( $T ) ) );
+    bz_co_fail( '' );
+    bz_co_post( bz_co_body( bz_co_key(), $one, bz_co_cash( $T ) ) );
+    bz_co_post( bz_co_body( $k1, $one, bz_co_cash( $T ) ) );
+    $o1    = bz_co_order( (int) bz_co_row( $k1 )['order_id'] );
+    $rec   = json_decode( (string) $o1->get_meta( '_bazaar_stock_changes' ), true )[0] ?? [];
+    $notes = implode( ' | ', wp_list_pluck( wc_get_order_notes( [ 'order_id' => $o1->get_id() ] ), 'content' ) );
+    $want  = wc_stock_amount( $s0 ) . '&rarr;' . wc_stock_amount( $s0 - 1 );
+    bz_co_say( 'stock_note', implode( ' ', [ (float) ( $rec['from'] ?? -1 ) === $s0 && (float) ( $rec['to'] ?? -1 ) === $s0 - 1 ? 'recorded' : wp_json_encode( [ $s0, $rec ] ), false !== strpos( $notes, $want ) || false !== strpos( $notes, html_entity_decode( $want ) ) ? 'note' : 'no-note', $s0 - bz_co_stock( $A ) ] ) );
+    bz_co_ledger( false );
   }
 }
 

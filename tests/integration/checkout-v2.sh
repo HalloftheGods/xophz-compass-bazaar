@@ -16,7 +16,13 @@
 # same-key retry (checkout_interrupted) and in the sweeper; the sweeper
 # finalizing a committed row and failing a stuck received row; staff never
 # attached as the customer and create_account; reads, permissions, the
-# disabled switch and the shift summary.
+# disabled switch and the shift summary. Review fixes (#6985): a listener
+# throwing after COMMIT leaves the paid sale completed; a repeated or stored
+# payment_uuid is refused before any order; zero-total sales with no tender or
+# one tender of 0; an order cancelled by staff while its row waits in
+# committed stays cancelled; a held finalize lock makes a same-key retry wait
+# and answer 409 without taking the lease; transitions renew the lease; the
+# stock note uses the values recorded at the commit.
 #
 # Taxes, ledger mode and failure points are switched on inside the wp-cli
 # processes this script starts; the store's options are not changed, except
@@ -106,6 +112,13 @@ expect_equal 'POST: logged out 401, subscriber 403' "$(check_line permissions)" 
 expect_equal 'POST: refused while checkout v2 is off' "$(check_line disabled)" '403 checkout_disabled'
 expect_equal 'shift summary: spec 14.1 keys, sell-only user narrowed to self' "$(check_line shift)" '200 window,orders,gross_minor,tips_minor,discounts_minor,refunds_minor,by_kind,void_required,totals cashier=self'
 expect_equal 'shift summary: admin sees the sales' "$(check_line shift_admin)" '200 counted'
+expect_equal 'after-commit listener throws: 200 completed, paid and moved once' "$(check_line after_commit_listener)" '200 completed completed 1 1 1'
+expect_equal 'payment_uuid repeated or already stored: 422 before any order' "$(check_line uuid_repeat)" '422 tender_invalid payment_uuid 422 tender_invalid stored 0'
+expect_equal 'zero total: no tender and one 0 tender complete with no payment; a 1 tender mismatches' "$(check_line zero_total)" '0 200 completed 0 No charge 200 completed 0 422 tender_total_mismatch'
+expect_equal 'order cancelled while committed: 409 order_cancelled, stays cancelled, stock back, payment kept' "$(check_line finalize_closed)" '409 order_cancelled cancelled cancelled 0 1 true'
+expect_equal 'finalize lock held elsewhere: retry waits, 409, lease kept; then completes once' "$(check_line finalize_locked)" '1 409 checkout_in_progress committed token-kept 200 completed 1 1'
+expect_equal 'lease: a transition renews it; a foreign token cannot' "$(check_line lease_renewal)" 'renewed foreign-refused'
+expect_equal 'stock note: from/to recorded at the commit, not at finalize' "$(check_line stock_note)" 'recorded note 2'
 
 KEYS="$(wp_eval 'echo implode(",", (array) get_option("bazaar_checkout_v2_test_keys", []));')"
 ORDER_IDS="$(wp_eval 'global $wpdb; $keys = (array) get_option("bazaar_checkout_v2_test_keys", []); $ids = []; foreach ($keys as $k) { $ids = array_merge($ids, $wpdb->get_col($wpdb->prepare("SELECT order_id FROM {$wpdb->prefix}bazaar_checkouts WHERE client_key = %s AND order_id IS NOT NULL", $k))); } echo implode(",", array_map("intval", $ids));')"

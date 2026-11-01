@@ -10,7 +10,9 @@
  *
  * run($limit) takes the oldest expired rows (received, priced, order_created,
  * committed), takes over each lease, then:
- * - committed: finalizes it (money and stock are already consistent);
+ * - committed: finalizes it (money and stock are already consistent). The
+ *   finalizer takes the finalize lock before it takes the lease, so a
+ *   request still finalizing the row is waited for, never overlapped;
  * - order_created: cancels the order (never deletes it) and the row;
  * - received and priced: fails the row, retryable, with checkout_interrupted.
  * A row whose lease another request took first is skipped.
@@ -83,13 +85,17 @@ class Xophz_Compass_Bazaar_Checkout_Sweeper {
 
   /** One expired row. @return string A key of run()'s counts. */
   public static function recover( array $row, Xophz_Compass_Bazaar_Checkout_Service $service ): string {
-    $S   = 'Xophz_Compass_Bazaar_Checkout_State';
+    $S = 'Xophz_Compass_Bazaar_Checkout_State';
+    if ( $S::COMMITTED === $row['state'] ) {
+      $done = $service->resume( $row, true );
+      if ( null === $done ) {
+        return 'finalize_failed';
+      }
+      return $S::COMPLETED === $done['state'] ? 'finalized' : ( $S::CANCELLED === $done['state'] ? 'cancelled' : 'skipped' );
+    }
     $row = Xophz_Compass_Bazaar_Checkout_Repository::take_expired( $row );
     if ( null === $row ) {
       return 'skipped';
-    }
-    if ( $S::COMMITTED === $row['state'] ) {
-      return $service->resume( $row ) ? 'finalized' : 'finalize_failed';
     }
     if ( $S::ORDER_CREATED === $row['state'] ) {
       return $service->cancel( $row, Xophz_Compass_Bazaar_Checkout_Service::interrupted() ) ? 'cancelled' : 'skipped';

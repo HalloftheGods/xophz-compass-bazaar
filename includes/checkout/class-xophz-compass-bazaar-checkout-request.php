@@ -12,7 +12,9 @@
  * - expected_total_minor: optional; null when absent.
  * - quote_hash: optional; '' or 64 hex characters (advisory, never enforced).
  * - cart: the spec 9.1 cart, through Pricing_Cart_Request::from_array.
- * - tenders: 1 to 10, each through Payments_Tender::from_array.
+ * - tenders: 0 to 10, each through Payments_Tender::from_array. A tender of
+ *   amount_minor 0 is allowed only as the only tender (the no-charge tender
+ *   of a zero-total sale); the service checks the sum against the total.
  * - approval_tokens: up to 10 strings.
  *
  * Guaranteed: every schema problem found is reported at once as 400
@@ -192,8 +194,8 @@ final class Xophz_Compass_Bazaar_Checkout_Request {
   }
 
   private function parse_tenders( $tenders ): void {
-    if ( ! is_array( $tenders ) || ! $tenders || array_keys( $tenders ) !== range( 0, count( $tenders ) - 1 ) ) {
-      $this->error( 'tenders', 'Must be a list of 1 to ' . self::MAX_TENDERS . ' tenders.' );
+    if ( ! is_array( $tenders ) || ( $tenders && array_keys( $tenders ) !== range( 0, count( $tenders ) - 1 ) ) ) {
+      $this->error( 'tenders', 'Must be a list of 0 to ' . self::MAX_TENDERS . ' tenders.' );
       return;
     }
     if ( count( $tenders ) > self::MAX_TENDERS ) {
@@ -206,7 +208,7 @@ final class Xophz_Compass_Bazaar_Checkout_Request {
         continue;
       }
       try {
-        $this->tenders[] = Xophz_Compass_Bazaar_Payments_Tender::from_array( $tender );
+        $this->tenders[] = Xophz_Compass_Bazaar_Payments_Tender::from_array( $tender, 1 === count( $tenders ) );
       } catch ( Xophz_Compass_Bazaar_Core_Http_Error $e ) {
         $this->error( "tenders[$i]." . (string) ( $e->data()['field'] ?? '' ), $e->getMessage() );
       }

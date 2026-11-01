@@ -18,12 +18,35 @@
  * skips the rest rather than repeating them. They are best effort and never
  * change the response.
  *
+ * Concurrency: finalize() runs under Checkout_Repository::lock_finalize(), a
+ * MySQL named lock per checkout, and first renews (or, for recovery, takes
+ * over) the lease. A second finalizer of the same row waits for the first,
+ * then sees the row completed and changes nothing, so status emails, coupon
+ * usage and total_sales fire once.
+ *
+ * The status changes only from pending (the status the order writer leaves).
+ * An order that is already cancelled, failed, refunded or trashed (staff
+ * cancelled it while the row waited in committed) is never moved back: the
+ * row moves to cancelled with error order_cancelled, the payments are left
+ * as they are and the stock audit lists the order as cancelled_with_payments.
+ * Any other status that differs from the target (staff marked it paid) is
+ * kept, with a note.
+ *
+ * The ledger stock note uses the _stock values the commit recorded inside
+ * its transaction (record_stock_changes()), not _stock at finalize time.
+ *
  * Not guaranteed: notes are written before their guard is saved, so a crash
  * between the two can repeat a note on the next run.
  *
  * @package Xophz_Compass_Bazaar
  */
 class Xophz_Compass_Bazaar_Checkout_Finalizer {
+
+  /** Order statuses finalize() never moves away from. */
+  const CLOSED_STATUSES = [ 'cancelled', 'failed', 'refunded', 'trash' ];
+
+  /** Seconds a finalizer waits for another finalizer of the same row. */
+  const LOCK_WAIT = 5;
 
   /** @var array<int,bool> Orders whose status this class is changing right now. */
   private static $finalizing = [];
@@ -34,16 +57,60 @@ class Xophz_Compass_Bazaar_Checkout_Finalizer {
   }
 
   /**
-   * @param array $row A committed checkout row held under this request's lease.
-   * @return array The completed row (or the row as another request left it when the lease was lost).
+   * @param array $row  A committed checkout row: held under this request's lease, or with $take, one whose lease expired.
+   * @param bool  $take True for recovery (same-key retry, sweeper): take over the expired lease once the finalize lock is held.
+   * @return array The completed (or cancelled) row, or the row as another request left it when the lease was lost or live.
+   * @throws Xophz_Compass_Bazaar_Core_Http_Error 409 checkout_in_progress when another finalizer of the row holds the lock.
    * @throws RuntimeException When the order is missing.
    */
-  public function finalize( array $row ): array {
+  public function finalize( array $row, bool $take = false ): array {
+    $id = (int) $row['id'];
+    if ( ! Xophz_Compass_Bazaar_Checkout_Repository::lock_finalize( $id, self::LOCK_WAIT ) ) {
+      throw new Xophz_Compass_Bazaar_Core_Http_Error( 'checkout_in_progress', 'This checkout is still being processed. Check its status shortly.', 409, [ 'retry_after_ms' => Xophz_Compass_Bazaar_Checkout_Service::RETRY_AFTER_MS ] );
+    }
+    try {
+      $current = Xophz_Compass_Bazaar_Checkout_Repository::find( $id ) ?? $row;
+      if ( Xophz_Compass_Bazaar_Checkout_State::COMMITTED !== $current['state'] ) {
+        return $current;
+      }
+      $held = $take ? Xophz_Compass_Bazaar_Checkout_Repository::take_expired( $current ) : Xophz_Compass_Bazaar_Checkout_Repository::renew_lease( $row );
+      return null === $held ? ( Xophz_Compass_Bazaar_Checkout_Repository::find( $id ) ?? $current ) : $this->finalize_held( $held );
+    } finally {
+      Xophz_Compass_Bazaar_Checkout_Repository::unlock_finalize( $id );
+    }
+  }
+
+  /**
+   * Record, inside the commit transaction, each ledger line's _stock after
+   * the sale (read under the commit's row locks) in _bazaar_stock_changes.
+   * Saved with save_meta_data(), so no order save hooks run in the transaction.
+   */
+  public static function record_stock_changes( WC_Order $order ): void {
+    global $wpdb;
+    $changes = [];
+    foreach ( Xophz_Compass_Bazaar_Checkout_Order_Writer::stock_lines( $order ) as $line ) {
+      $pid = (int) ( $line['variation_id'] ?: $line['product_id'] );
+      $to  = Xophz_Compass_Bazaar_Core_Db::get_var( "SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = '_stock' LIMIT 1", [ $pid ] );
+      if ( null === $to || '' === (string) $to ) {
+        continue;
+      }
+      $changes[] = [ 'product_id' => $pid, 'from' => (float) $to + (float) $line['quantity'], 'to' => (float) $to ];
+    }
+    $order->update_meta_data( '_bazaar_stock_changes', wp_json_encode( $changes ) );
+    $order->save_meta_data();
+  }
+
+  /** finalize() once the lock and the lease are held. */
+  private function finalize_held( array $row ): array {
     $order = wc_get_order( (int) $row['order_id'] );
     if ( ! $order instanceof WC_Order ) {
       throw new RuntimeException( 'The order of checkout ' . (int) $row['id'] . ' is missing.' );
     }
     $payments = Xophz_Compass_Bazaar_Payments_Repository::for_checkout( (int) $row['id'] );
+    $current  = (string) $order->get_status();
+    if ( in_array( $current, self::CLOSED_STATUSES, true ) ) {
+      return $this->closed( $row, $order, $payments, $current );
+    }
     $this->set_payment_fields( $order, $payments );
     $this->add_payment_notes( $order, $payments );
     if ( 'ledger' === (string) $row['stock_owner'] ) {
@@ -52,13 +119,17 @@ class Xophz_Compass_Bazaar_Checkout_Finalizer {
     $order->save();
 
     $status = self::target_status( $payments );
-    if ( $order->get_status() !== $status ) {
+    if ( 'pending' === $current && $status !== $current ) {
       self::$finalizing[ $order->get_id() ] = true;
       try {
         $order->update_status( $status, sprintf( 'Bazaar POS checkout %d completed.', (int) $row['id'] ) );
       } finally {
         unset( self::$finalizing[ $order->get_id() ] );
       }
+    } elseif ( $status !== $current && 'yes' !== $order->get_meta( '_bazaar_status_kept' ) ) {
+      $order->update_meta_data( '_bazaar_status_kept', 'yes' );
+      $order->add_order_note( sprintf( 'Bazaar POS checkout %d completed. The order status was already %s, so it was kept (the sale would have set %s).', (int) $row['id'], $current, $status ) );
+      $order->save();
     }
 
     $body = self::response( $row, $order, $payments );
@@ -72,6 +143,23 @@ class Xophz_Compass_Bazaar_Checkout_Finalizer {
     }
     $this->post_complete( $order, $done );
     return $done;
+  }
+
+  /**
+   * The order was closed (cancelled, failed, refunded, trashed) before the
+   * sale finished: keep that status, note the payments, and cancel the row
+   * with order_cancelled. Payments are not voided (spec 11.4: an admin cancel
+   * leaves payments to the audit's cancelled_with_payments).
+   */
+  private function closed( array $row, WC_Order $order, array $payments, string $status ): array {
+    $this->add_payment_notes( $order, $payments );
+    $order->update_meta_data( '_bazaar_failure_code', 'order_cancelled' );
+    $order->add_order_note( sprintf( 'Bazaar POS checkout %d was paid, but this order was already %s before the sale finished. The status was kept; void or refund the %d payment(s) by hand.', (int) $row['id'], $status, count( $payments ) ) );
+    $order->save();
+    error_log( sprintf( 'Bazaar checkout %d: order %d is %s with %d committed payment(s); the row is cancelled, payments left for review.', (int) $row['id'], (int) $order->get_id(), $status, count( $payments ) ) );
+    $err  = new Xophz_Compass_Bazaar_Core_Http_Error( 'order_cancelled', 'The sale was paid, but its order was ' . $status . ' before it finished. The order was left ' . $status . '; void or refund the payments.', 409, [ 'order_id' => (int) $order->get_id(), 'order_status' => $status ] );
+    $done = Xophz_Compass_Bazaar_Checkout_Repository::transition( $row, Xophz_Compass_Bazaar_Checkout_State::CANCELLED, Xophz_Compass_Bazaar_Checkout_Service::error_changes( $err, false ) );
+    return $done ?? ( Xophz_Compass_Bazaar_Checkout_Repository::find( (int) $row['id'] ) ?? $row );
   }
 
   /**
@@ -157,6 +245,12 @@ class Xophz_Compass_Bazaar_Checkout_Finalizer {
 
   private function set_payment_fields( WC_Order $order, array $payments ): void {
     $decimals = function_exists( 'wc_get_price_decimals' ) ? (int) wc_get_price_decimals() : 2;
+    if ( ! $payments ) {
+      // A zero-total sale: no money moved.
+      $order->set_payment_method( '' );
+      $order->set_payment_method_title( 'No charge' );
+      return;
+    }
     if ( 1 === count( $payments ) ) {
       $only = $payments[0];
       $order->set_payment_method( (string) $only->method_id );
@@ -194,6 +288,9 @@ class Xophz_Compass_Bazaar_Checkout_Finalizer {
     }
     $decimals = function_exists( 'wc_get_price_decimals' ) ? (int) wc_get_price_decimals() : 2;
     $count    = count( $payments );
+    if ( ! $count ) {
+      $order->add_order_note( 'No payment taken: the sale total is 0.' );
+    }
     foreach ( $payments as $p ) {
       $payload = json_decode( (string) $p->provider_payload, true );
       $note    = is_array( $payload ) ? (string) ( $payload['note'] ?? '' ) : '';
@@ -215,14 +312,25 @@ class Xophz_Compass_Bazaar_Checkout_Finalizer {
     if ( 'yes' === $order->get_meta( '_bazaar_stock_notified' ) || ! function_exists( 'wc_trigger_stock_change_notifications' ) ) {
       return;
     }
-    $changes = [];
-    foreach ( Xophz_Compass_Bazaar_Checkout_Order_Writer::stock_lines( $order ) as $line ) {
-      $product = wc_get_product( $line['variation_id'] ?: $line['product_id'] );
-      if ( ! $product || ! $product->managing_stock() ) {
-        continue;
+    $changes  = [];
+    $recorded = json_decode( (string) $order->get_meta( '_bazaar_stock_changes' ), true );
+    if ( is_array( $recorded ) ) {
+      foreach ( $recorded as $c ) {
+        $product = is_array( $c ) ? wc_get_product( (int) ( $c['product_id'] ?? 0 ) ) : null;
+        if ( $product && $product->managing_stock() ) {
+          $changes[] = [ 'product' => $product, 'from' => (float) $c['from'], 'to' => (float) $c['to'] ];
+        }
       }
-      $to        = (float) $product->get_stock_quantity();
-      $changes[] = [ 'product' => $product, 'from' => $to + (float) $line['quantity'], 'to' => $to ];
+    } else {
+      // Rows committed before _bazaar_stock_changes existed: _stock now is the best guess.
+      foreach ( Xophz_Compass_Bazaar_Checkout_Order_Writer::stock_lines( $order ) as $line ) {
+        $product = wc_get_product( $line['variation_id'] ?: $line['product_id'] );
+        if ( ! $product || ! $product->managing_stock() ) {
+          continue;
+        }
+        $to        = (float) $product->get_stock_quantity();
+        $changes[] = [ 'product' => $product, 'from' => $to + (float) $line['quantity'], 'to' => $to ];
+      }
     }
     if ( $changes ) {
       wc_trigger_stock_change_notifications( $order, $changes );
