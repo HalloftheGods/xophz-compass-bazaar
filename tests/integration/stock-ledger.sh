@@ -15,7 +15,10 @@
 # - a multi-inventory product keeps disabled-location stock out of `_stock`
 #   and mirrors its balances into _compass_multi_inventory;
 # - ledger mode is refused while there is drift, unless forced with a reason;
-# - shadow mode adjusts WooCommerce stock without the ledger.
+# - shadow mode adjusts WooCommerce stock outside the ledger, and the observer
+#   then records the change as an `adjust` batch, so the balance follows;
+# - cleanup leaves none of the fixtures' ledger or outbox rows behind, so the
+#   script can run again on the same site.
 #
 # The sequential checks run in-process (stock-ledger-fixtures.php) because
 # every WordPress boot in the Docker stack takes seconds; the parallel checks
@@ -64,8 +67,12 @@ if [ -z "${P5:-}" ] || [ -z "${W2:-}" ]; then
   echo "setup failed: $setup"
   exit 1
 fi
+CLEANED=0
+run_cleanup() {
+  fix cleanup -e PIDS="$P1,$P2,$P3,$P4,$P5" -e WIDS="$W1,$W2" -e SAVED="$SAVED"
+}
 cleanup() {
-  fix cleanup -e PIDS="$P1,$P2,$P3,$P4,$P5" -e WIDS="$W1,$W2" -e SAVED="$SAVED" >/dev/null
+  [ "$CLEANED" -eq 1 ] || run_cleanup >/dev/null
   rm -rf "$SCRATCH"
 }
 trap cleanup EXIT
@@ -163,6 +170,13 @@ expect 'shadow: adjustment answers 200' "$out" 'shadow.status=200'
 expect 'shadow: no ledger involved' "$out" 'shadow.ledger=false'
 expect 'shadow: _stock +2' "$out" 'shadow.wc=11'
 expect 'shadow: observer records +2 as an observed batch' "$out" 'shadow.bal0=11'
+expect 'shadow: the observed batch is an adjust' "$out" 'shadow.batch_reason=adjust'
 expect 'shadow: a warehouse adjustment is 422 unsupported_field' "$out" 'shadow.warehouse.code=unsupported_field'
+
+# Cleanup now (the EXIT trap only covers an early exit), then check it left nothing.
+out="$(run_cleanup)"
+CLEANED=1
+expect 'cleanup: trashes the 5 products and 2 warehouses' "$out" 'cleanup.trashed=7'
+expect 'cleanup: no ledger or outbox rows of the fixtures left' "$out" 'cleanup.rows_left=0'
 
 bz_finish

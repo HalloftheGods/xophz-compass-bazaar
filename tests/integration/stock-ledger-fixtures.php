@@ -17,7 +17,9 @@
  * - seq_drift P1..P5, W1, ADMIN, RUN: the parallel results, then drift
  *   refusal and shadow mode.
  * - cleanup PIDS, WIDS, SAVED: deletes the ledger and outbox rows of those
- *   products' batches, trashes the posts and puts the mode options back.
+ *   products' batches and the products' own outbox rows (drift events),
+ *   trashes the posts, puts the mode options back and prints
+ *   cleanup.rows_left (0 when none of those rows is left).
  *
  * Only touches the ids it is given. Ledger rows of other products are left as
  * they are. Nonce checks are not exercised (rest_do_request skips them).
@@ -142,6 +144,10 @@ switch ( $env( 'FIX_ACTION' ) ) {
     $say( 'mode.shadow.status', $r['status'] );
     $r = $rest( 'POST', '/bazaar/v1/stock/mode', [ 'mode' => 'ledger' ] );
     $say( 'mode.ledger.status', $r['status'] );
+    if ( 200 !== $r['status'] ) {
+      // Name what the site-wide audit found, so a refusal is diagnosable from the FAIL line.
+      $say( 'mode.ledger.refused_by', array_column( Xophz_Compass_Bazaar_Stock_Audit::run()['violations'], 'message' ) );
+    }
     $say( 'mode.ledger.mode', $r['data']['mode'] ?? '' );
     $say( 'mode.ledger.engines_ok', $r['data']['engines_ok'] ?? null );
     $say( 'mode.ledger.violations', $r['data']['violations'] ?? null );
@@ -265,6 +271,7 @@ switch ( $env( 'FIX_ACTION' ) ) {
     $say( 'shadow.ledger', $r['data']['ledger'] ?? null );
     $say( 'shadow.wc', $s['wc'] );
     $say( 'shadow.bal0', $s['bal'][0] ?? null );
+    $say( 'shadow.batch_reason', (string) $wpdb->get_var( $wpdb->prepare( 'SELECT b.reason FROM ' . $tbl( 'stock_batches' ) . ' b JOIN ' . $tbl( 'stock_movements' ) . ' m ON m.batch_id = b.id WHERE m.stock_product_id = %d ORDER BY b.id DESC LIMIT 1', $p['P1'] ) ) );
     $r = $adjust( [ 'client_key' => "$run-sh2", 'product_id' => $p['P4'], 'location_id' => $p['W1'], 'operation' => 'add', 'quantity' => 1 ] );
     $say( 'shadow.warehouse.code', $r['data']['code'] ?? '' );
     break;
@@ -281,6 +288,7 @@ switch ( $env( 'FIX_ACTION' ) ) {
         $wpdb->query( 'DELETE FROM ' . $tbl( 'stock_movements' ) . " WHERE batch_id IN ($bin)" );
         $wpdb->query( 'DELETE FROM ' . $tbl( 'stock_batches' ) . " WHERE id IN ($bin)" );
       }
+      $wpdb->query( 'DELETE FROM ' . $tbl( 'events' ) . " WHERE aggregate_type = 'product' AND aggregate_id IN ($in)" );
       $wpdb->query( 'DELETE FROM ' . $tbl( 'stock_balances' ) . " WHERE stock_product_id IN ($in)" );
     }
     $trashed = 0;
@@ -299,6 +307,17 @@ switch ( $env( 'FIX_ACTION' ) ) {
     }
     $say( 'cleanup.batches', count( $batch_ids ) );
     $say( 'cleanup.trashed', $trashed );
+    $left = 0;
+    if ( $pids ) {
+      $left += (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . $tbl( 'stock_movements' ) . " WHERE stock_product_id IN ($in)" );
+      $left += (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . $tbl( 'stock_balances' ) . " WHERE stock_product_id IN ($in)" );
+      $left += (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . $tbl( 'events' ) . " WHERE aggregate_type = 'product' AND aggregate_id IN ($in)" );
+    }
+    if ( $batch_ids ) {
+      $left += (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . $tbl( 'stock_batches' ) . " WHERE id IN ($bin)" );
+      $left += (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . $tbl( 'events' ) . " WHERE aggregate_type = 'stock_batch' AND aggregate_id IN ($bin)" );
+    }
+    $say( 'cleanup.rows_left', $left );
     $say( 'cleanup.mode', get_option( 'bazaar_ledger_mode', '__absent__' ) );
     break;
 
