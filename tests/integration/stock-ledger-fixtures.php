@@ -16,7 +16,21 @@
  *   and initializes P2 and P3 for the parallel checks.
  * - seq_drift P1..P5, W1, ADMIN, RUN: the parallel results, then drift
  *   refusal and shadow mode.
- * - cleanup RUN, PIDS, WIDS, SAVED: deletes the ledger and outbox rows of
+ * - conc_orders C1..C3, RUN: four processing orders tagged with RUN and
+ *   marked ledger-owned (O1 and O2 each want the last unit of C1, O3 one
+ *   of C2, O4 one of C3), created before the ledger meta so WooCommerce
+ *   reduces nothing; the products are initialized. Prints one JSON line.
+ * - conc_run ORDER, DELAY_MS: one ledger sale of the order, the way the
+ *   checkout commit runs it: Stock_Service::sync_order inside a Core_Db::tx
+ *   that allows no deadlock retry, after a plain read. The store sleeps
+ *   DELAY_MS before its first batch insert, so two overlapping calls have
+ *   both done every read before either writes. Prints conc.result=ok,
+ *   insufficient_stock, deadlock:<message> or error:<class>:<message>.
+ * - conc_check C1..C3, RUN: the products' `_stock` and balances after the
+ *   overlapping sales; an order left with no movement (the refused one) is
+ *   cancelled, so its stock target is released.
+ * - cleanup RUN, PIDS, WIDS, SAVED: moves the orders tagged with RUN to the
+ *   trash (orders are never deleted), deletes the ledger and outbox rows of
  *   those products' batches and the products' own outbox rows (drift
  *   events), moves the posts to the trash and then force-deletes them,
  *   puts the mode options back and prints cleanup.rows_left (the rows the
@@ -116,7 +130,7 @@ $adjust = function ( array $body ) use ( $rest ): array {
 };
 
 $p   = [];
-foreach ( [ 'P1', 'P2', 'P3', 'P4', 'P5', 'W1', 'W2' ] as $name ) {
+foreach ( [ 'P1', 'P2', 'P3', 'P4', 'P5', 'W1', 'W2', 'C1', 'C2', 'C3' ] as $name ) {
   $p[ $name ] = (int) $env( $name );
 }
 $run = $env( 'RUN' );
@@ -135,6 +149,9 @@ switch ( $env( 'FIX_ACTION' ) ) {
         'P3'    => $product( 5, "Stock ledger same key $run" ),
         'P4'    => $product( 4, "Stock ledger multi $run", [ $w['W1'] => [ 4, true ], $w['W2'] => [ 3, false ] ] ),
         'P5'    => $product( 6, "Stock ledger drift $run" ),
+        'C1'    => $product( 1, "Stock ledger last unit $run" ),
+        'C2'    => $product( 5, "Stock ledger overlap a $run" ),
+        'C3'    => $product( 5, "Stock ledger overlap b $run" ),
         'W1'    => $w['W1'],
         'W2'    => $w['W2'],
         'ADMIN' => $admin(),
@@ -280,7 +297,81 @@ switch ( $env( 'FIX_ACTION' ) ) {
     $say( 'shadow.warehouse.code', $r['data']['code'] ?? '' );
     break;
 
+  case 'conc_orders':
+    $orders = [];
+    foreach ( [ 'O1' => 'C1', 'O2' => 'C1', 'O3' => 'C2', 'O4' => 'C3' ] as $name => $pname ) {
+      // Processing before it has items or the ledger meta, so WooCommerce reduces nothing.
+      $order = wc_create_order( [ 'status' => 'processing' ] );
+      $order->add_product( wc_get_product( $p[ $pname ] ), 1 );
+      $order->update_meta_data( '_bazaar_test_run', $run );
+      $order->update_meta_data( '_bazaar_stock_owner', 'ledger' );
+      $order->update_meta_data( '_bazaar_location_id', 0 );
+      $order->calculate_totals();
+      $order->save();
+      $orders[ $name ] = $order->get_id();
+    }
+    foreach ( [ 'C1', 'C2', 'C3' ] as $name ) {
+      Xophz_Compass_Bazaar_Stock_Factory::service()->ensure_initialized( $p[ $name ] );
+    }
+    echo wp_json_encode( $orders ) . "\n";
+    break;
+
+  case 'conc_run':
+    $order = wc_get_order( (int) $env( 'ORDER' ) );
+    $store = new class() extends Xophz_Compass_Bazaar_Stock_Store_Wpdb {
+      /** @var int Milliseconds to sleep before the first batch insert. */
+      public $delay = 0;
+      public function insert_batch( array $row ): int {
+        if ( $this->delay > 0 ) {
+          usleep( $this->delay * 1000 );
+          $this->delay = 0;
+        }
+        return parent::insert_batch( $row );
+      }
+    };
+    $store->delay = (int) $env( 'DELAY_MS' );
+    $service      = new Xophz_Compass_Bazaar_Stock_Service( $store, Xophz_Compass_Bazaar_Stock_Factory::port() );
+    try {
+      Xophz_Compass_Bazaar_Core_Db::tx(
+        function () use ( $service, $order ) {
+          // Like the checkout commit: the transaction has read before the stock sale.
+          Xophz_Compass_Bazaar_Core_Db::get_var( 'SELECT COUNT(*) FROM ' . Xophz_Compass_Bazaar_Core_Db::table( 'stock_balances' ) );
+          return $service->sync_order( $order->get_id(), true, Xophz_Compass_Bazaar_Stock_Order_Lifecycle::order_lines( $order ), new Xophz_Compass_Bazaar_Stock_Meta( [ 'actor_user_id' => 0 ] ) );
+        },
+        0
+      );
+      $say( 'conc.result', 'ok' );
+    } catch ( Xophz_Compass_Bazaar_Stock_Insufficient_Exception $e ) {
+      $say( 'conc.result', 'insufficient_stock' );
+    } catch ( Xophz_Compass_Bazaar_Core_Deadlock_Exception $e ) {
+      $say( 'conc.result', 'deadlock:' . $e->getMessage() );
+    } catch ( Throwable $e ) {
+      $say( 'conc.result', 'error:' . get_class( $e ) . ':' . $e->getMessage() );
+    }
+    break;
+
+  case 'conc_check':
+    foreach ( [ 'C1', 'C2', 'C3' ] as $name ) {
+      $s = $state( $p[ $name ] );
+      $say( "conc.$name.wc", $s['wc'] );
+      $say( "conc.$name.bal0", $s['bal'][0] ?? null );
+    }
+    $cancelled = 0;
+    foreach ( wc_get_orders( [ 'limit' => -1, 'type' => 'shop_order', 'meta_query' => [ [ 'key' => '_bazaar_test_run', 'value' => $run ] ] ] ) as $order ) {
+      $moved = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . $tbl( 'stock_movements' ) . ' WHERE order_id = %d', $order->get_id() ) );
+      if ( 0 === $moved ) {
+        $order->update_status( 'cancelled' );
+        $cancelled++;
+      }
+    }
+    $say( 'conc.cancelled', $cancelled );
+    break;
+
   case 'cleanup':
+    $trashed_orders = 0;
+    foreach ( wc_get_orders( [ 'limit' => -1, 'type' => 'shop_order', 'status' => array_keys( wc_get_order_statuses() ), 'meta_query' => [ [ 'key' => '_bazaar_test_run', 'value' => $run ] ] ] ) as $order ) {
+      $trashed_orders += $order->delete( false ) ? 1 : 0;
+    }
     $pids      = array_values( array_filter( array_map( 'intval', explode( ',', $env( 'PIDS' ) ) ) ) );
     $batch_ids = [];
     if ( $pids ) {
@@ -311,6 +402,7 @@ switch ( $env( 'FIX_ACTION' ) ) {
         }
       }
     }
+    $say( 'cleanup.orders', $trashed_orders );
     $say( 'cleanup.batches', count( $batch_ids ) );
     $say( 'cleanup.trashed', $trashed );
     $say( 'cleanup.deleted', $deleted );

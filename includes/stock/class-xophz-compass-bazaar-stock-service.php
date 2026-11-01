@@ -14,6 +14,16 @@
  * key) re-runs the call once, which then replays the winner's batch. That
  * retry happens only at the service's outermost level.
  *
+ * Reads (finding 7 of #6983): nothing is read with a lock before the
+ * products' `_stock` rows are locked, and the batch-key and order lookups
+ * are plain reads, because a locking read of a key that does not exist yet
+ * takes a gap lock that overlapping checkouts deadlock on. A plain read can
+ * miss a concurrent winner's batch; the unique key then refuses the insert,
+ * and the re-run reads current. An order's movements are read current
+ * (after the lock) except for a sale of an order the plain read found no
+ * movement for: a concurrent sale of the same order from that state uses
+ * the same key, so it ends in the duplicate-key re-run as well.
+ *
  * Not done here: outbox rows (stock.batch.recorded) and cache clean-up on
  * rollback belong to the wpdb store and port (WP7).
  *
@@ -36,10 +46,17 @@ final class Xophz_Compass_Bazaar_Stock_Service {
   /** @var array[] Queued after_commit calls: [pids, reason]. */
   private $pending = [];
 
+  /** @var bool True during the re-run after a duplicate key: lookups are current reads. */
+  private $current = false;
+
+  /** @var Xophz_Compass_Bazaar_Stock_Resolver */
+  private $keys;
+
   /** @param callable|null $clock Returns the UTC 'Y-m-d H:i:s' now; defaults to gmdate. */
   public function __construct( Xophz_Compass_Bazaar_Stock_Store $store, Xophz_Compass_Bazaar_Stock_Wc_Port $wc, ?callable $clock = null ) {
     $this->store = $store;
     $this->wc    = $wc;
+    $this->keys  = new Xophz_Compass_Bazaar_Stock_Resolver( $wc );
     $this->clock = $clock ?: function () {
       return gmdate( 'Y-m-d H:i:s' );
     };
@@ -51,7 +68,7 @@ final class Xophz_Compass_Bazaar_Stock_Service {
     return $this->replay( $batch->idem_key(), $hash ) ?? $this->run(
       function () use ( $batch, $hash ) {
         $infos = [];
-        $lines = $this->resolve( $batch->lines(), $infos );
+        $lines = $this->keys->lines( $batch->lines(), $infos );
         if ( ! $lines ) {
           return Xophz_Compass_Bazaar_Stock_Result::none();
         }
@@ -87,7 +104,7 @@ final class Xophz_Compass_Bazaar_Stock_Service {
     return $this->replay( $key, $hash ) ?? $this->run(
       function () use ( $key, $pid, $loc, $counted, $expected, $reason, $meta, $options, $hash ) {
         $infos = [];
-        $owner = $this->stock_key( $pid, $infos );
+        $owner = $this->keys->stock_key( $pid, $infos );
         if ( ! $owner ) {
           return Xophz_Compass_Bazaar_Stock_Result::none();
         }
@@ -132,12 +149,17 @@ final class Xophz_Compass_Bazaar_Stock_Service {
     return $this->run(
       function () use ( $order_id, $committed, $lines, $meta ) {
         $infos = [];
-        list( $order_lines, $pids ) = $this->order_prep( $order_id, $lines, $infos );
+        list( $order_lines, $pids, $seen ) = $this->order_prep( $order_id, $lines, $infos );
         if ( ! $pids ) {
           return Xophz_Compass_Bazaar_Stock_Result::none();
         }
-        $wc     = $this->lock( $pids );
-        $sums   = $this->store->order_sums( $order_id );
+        $wc = $this->lock( $pids );
+        if ( $committed && ! $seen['items'] && ! $this->current ) {
+          $sums = $seen;
+        } else {
+          $sums = $this->store->order_sums( $order_id, true );
+          $wc  += $this->lock_more( $sums, $pids, $infos );
+        }
         $deltas = Xophz_Compass_Bazaar_Stock_Order_Math::deltas( $order_lines, $sums, $committed );
         $key    = Xophz_Compass_Bazaar_Stock_Keys::order_sync( $order_id, (int) ( $sums['last_movement_id'] ?? 0 ), $committed );
         $reason = Xophz_Compass_Bazaar_Stock_Order_Math::batch_reason( $deltas, $committed );
@@ -166,7 +188,9 @@ final class Xophz_Compass_Bazaar_Stock_Service {
           return Xophz_Compass_Bazaar_Stock_Result::none();
         }
         $wc     = $this->lock( $pids );
-        $deltas = Xophz_Compass_Bazaar_Stock_Order_Math::restock( $order_lines, $this->store->order_sums( $order_id ), $item_qtys );
+        $sums   = $this->store->order_sums( $order_id, true );
+        $wc    += $this->lock_more( $sums, $pids, $infos );
+        $deltas = Xophz_Compass_Bazaar_Stock_Order_Math::restock( $order_lines, $sums, $item_qtys );
         return $this->commit_order( $order_id, $key, 'refund_restock', $deltas, $options, $pids, $wc, $meta, $infos );
       }
     );
@@ -183,7 +207,7 @@ final class Xophz_Compass_Bazaar_Stock_Service {
     return $this->run(
       function () use ( $pid, $reason, $meta, $source ) {
         $infos = [];
-        $owner = $this->stock_key( $pid, $infos );
+        $owner = $this->keys->stock_key( $pid, $infos );
         if ( ! $owner ) {
           return null;
         }
@@ -202,7 +226,7 @@ final class Xophz_Compass_Bazaar_Stock_Service {
     $this->run(
       function () use ( $pid ) {
         $infos = [];
-        $owner = $this->stock_key( $pid, $infos );
+        $owner = $this->keys->stock_key( $pid, $infos );
         if ( $owner ) {
           $this->settle( [ $owner['key'] ], $this->lock( [ $owner['key'] ] ), [], new Xophz_Compass_Bazaar_Stock_Meta(), $infos, null );
         }
@@ -222,7 +246,7 @@ final class Xophz_Compass_Bazaar_Stock_Service {
     return $this->run(
       function () use ( $pid, $loc, $enabled, $meta ) {
         $infos = [];
-        $owner = $this->stock_key( $pid, $infos );
+        $owner = $this->keys->stock_key( $pid, $infos );
         if ( ! $owner ) {
           return Xophz_Compass_Bazaar_Stock_Result::none();
         }
@@ -246,7 +270,7 @@ final class Xophz_Compass_Bazaar_Stock_Service {
   /** loc => ['on_hand', 'is_enabled'] for the product's stock key. Initializes the product on first touch. */
   public function balances( int $pid ): array {
     $infos = [];
-    $owner = $this->stock_key( $pid, $infos );
+    $owner = $this->keys->stock_key( $pid, $infos );
     if ( ! $owner ) {
       return [];
     }
@@ -293,7 +317,7 @@ final class Xophz_Compass_Bazaar_Stock_Service {
       if ( ! Xophz_Compass_Bazaar_Stock_Planner::differs( $diff, 0.0 ) ) {
         continue;
       }
-      $line  = new Xophz_Compass_Bazaar_Stock_Line( $pid, 0, $diff, self::product_ids( $infos, $pid ) );
+      $line  = new Xophz_Compass_Bazaar_Stock_Line( $pid, 0, $diff, Xophz_Compass_Bazaar_Stock_Resolver::product_ids( $infos, $pid ) );
       $batch = new Xophz_Compass_Bazaar_Stock_Batch(
         Xophz_Compass_Bazaar_Stock_Keys::reconcile( $pid, $this->store->last_movement_id( $pid ), $wc[ $pid ] ),
         $drift_reason,
@@ -318,7 +342,7 @@ final class Xophz_Compass_Bazaar_Stock_Service {
         $balances[ "$pid:$loc" ]['is_enabled'] = false;
       }
       if ( Xophz_Compass_Bazaar_Stock_Planner::differs( $entry['qty'], 0.0 ) ) {
-        $lines[] = new Xophz_Compass_Bazaar_Stock_Line( $pid, $loc, $entry['qty'], self::product_ids( $infos, $pid ) );
+        $lines[] = new Xophz_Compass_Bazaar_Stock_Line( $pid, $loc, $entry['qty'], Xophz_Compass_Bazaar_Stock_Resolver::product_ids( $infos, $pid ) );
       }
     }
     if ( ! $lines ) {
@@ -377,7 +401,11 @@ final class Xophz_Compass_Bazaar_Stock_Service {
     return [ $balances, $batch_id, $lines ];
   }
 
-  /** Run in the service's transaction; one re-run after a duplicate key at the outermost level. */
+  /**
+   * Run in the service's transaction; one re-run after a duplicate key at the
+   * outermost level, with current reads (inside a caller's transaction the
+   * snapshot that missed the winner is still the same).
+   */
   private function run( callable $fn ) {
     try {
       return $this->tx( $fn );
@@ -385,7 +413,13 @@ final class Xophz_Compass_Bazaar_Stock_Service {
       if ( $this->depth > 0 ) {
         throw $e;
       }
-      return $this->tx( $fn );
+      $was           = $this->current;
+      $this->current = true;
+      try {
+        return $this->tx( $fn );
+      } finally {
+        $this->current = $was;
+      }
     }
   }
 
@@ -409,7 +443,7 @@ final class Xophz_Compass_Bazaar_Stock_Service {
 
   /** The stored batch as a replay, null when the key is unused; idempotency_key_reused when the hash differs. */
   private function replay( string $key, string $hash ): ?Xophz_Compass_Bazaar_Stock_Result {
-    $found = $this->store->find_batch( $key );
+    $found = $this->store->find_batch( $key, $this->current );
     if ( null === $found ) {
       return null;
     }
@@ -431,67 +465,34 @@ final class Xophz_Compass_Bazaar_Stock_Service {
   }
 
   /**
-   * The stock key for a product or variation, recording the key's product
-   * info in $infos. Null when the product is missing or does not manage stock.
+   * Lock the stock keys of $sums (an order's movements, read after the lock)
+   * that $pids does not hold yet, adding them to $pids. Only a concurrent
+   * change to the order's items brings any.
    *
-   * @return array|null ['key' => int, 'product_id' => int, 'variation_id' => int]
+   * @return array pid => float for the newly locked keys.
    */
-  private function stock_key( int $id, array &$infos ): ?array {
-    $info = $id > 0 ? $this->wc->product_info( $id ) : null;
-    if ( ! $info || empty( $info['manages_stock'] ) ) {
-      return null;
+  private function lock_more( array $sums, array &$pids, array &$infos ): array {
+    $more = array_values( array_diff( $this->keys->order_keys( $sums, $infos ), $pids ) );
+    if ( ! $more ) {
+      return [];
     }
-    $key   = (int) ( $info['stock_product_id'] ?? 0 ) ?: $id;
-    $owner = $key === $id ? $info : $this->wc->product_info( $key );
-    if ( ! $owner || empty( $owner['manages_stock'] ) ) {
-      return null;
-    }
-    $infos[ $key ] = $owner;
-    return [ 'key' => $key, 'product_id' => (int) ( $info['product_id'] ?? $id ), 'variation_id' => (int) ( $info['variation_id'] ?? 0 ) ];
-  }
-
-  /** Lines moved to their stock keys; zero lines and products that do not manage stock are dropped. */
-  private function resolve( array $lines, array &$infos ): array {
-    $out = [];
-    foreach ( $lines as $line ) {
-      $owner = Xophz_Compass_Bazaar_Stock_Planner::differs( $line->qty_delta(), 0.0 ) ? $this->stock_key( $line->stock_product_id(), $infos ) : null;
-      if ( $owner ) {
-        $out[] = $line->for_stock_key( $owner['key'], $owner['product_id'], $owner['variation_id'] );
-      }
-    }
-    return $out;
-  }
-
-  /** Normalized order lines on stock keys, and every stock key the order touches (lines plus earlier movements). */
-  private function order_prep( int $order_id, array $lines, array &$infos ): array {
-    $order_lines = [];
-    $pids        = [];
-    foreach ( $lines as $raw ) {
-      $id    = (int) ( $raw['stock_product_id'] ?? 0 ) ?: ( (int) ( $raw['variation_id'] ?? 0 ) ?: (int) ( $raw['product_id'] ?? 0 ) );
-      $owner = $this->stock_key( $id, $infos );
-      if ( ! $owner ) {
-        continue;
-      }
-      $raw['stock_product_id'] = $owner['key'];
-      $raw['product_id']       = (int) ( $raw['product_id'] ?? 0 ) ?: $owner['product_id'];
-      $raw['variation_id']     = (int) ( $raw['variation_id'] ?? 0 ) ?: $owner['variation_id'];
-      $order_lines[]           = Xophz_Compass_Bazaar_Stock_Order_Math::normalize( $raw );
-      $pids[ $owner['key'] ]   = true;
-    }
-    foreach ( $this->store->order_sums( $order_id )['items'] ?? [] as $locs ) {
-      foreach ( $locs as $row ) {
-        $pid = (int) ( $row['stock_product_id'] ?? 0 );
-        if ( $pid > 0 && ! isset( $pids[ $pid ] ) && $this->stock_key( $pid, $infos ) ) {
-          $pids[ $pid ] = true;
-        }
-      }
-    }
-    $pids = array_keys( $pids );
+    $pids = array_merge( $pids, $more );
     sort( $pids );
-    return [ $order_lines, $pids ];
+    return $this->lock( $more );
   }
 
-  private static function product_ids( array $infos, int $pid ): array {
-    return [ 'product_id' => (int) ( $infos[ $pid ]['product_id'] ?? 0 ), 'variation_id' => (int) ( $infos[ $pid ]['variation_id'] ?? 0 ) ];
+  /**
+   * Normalized order lines on stock keys, every stock key the order touches
+   * (lines plus earlier movements), and the order's movement sums from a
+   * plain read (no lock is held yet).
+   *
+   * @return array [order lines, pids ascending, sums]
+   */
+  private function order_prep( int $order_id, array $lines, array &$infos ): array {
+    list( $order_lines, $pids ) = $this->keys->order_lines( $lines, $infos );
+    $seen                       = $this->store->order_sums( $order_id, false );
+    $pids                       = array_values( array_unique( array_merge( $pids, $this->keys->order_keys( $seen, $infos ) ) ) );
+    sort( $pids );
+    return [ $order_lines, $pids, $seen ];
   }
 }

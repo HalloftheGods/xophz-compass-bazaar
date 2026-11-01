@@ -10,15 +10,28 @@
  *   locks every pair with SELECT ... FOR UPDATE ordered by (pid, loc).
  * - insert_batch() also writes the outbox row stock.batch.recorded in the
  *   same transaction; a taken idem_key throws Core_Duplicate_Key_Exception.
- * - Inside a transaction, the reads the service makes after it has locked a
- *   product (find_batch, has_balances, balances, last_movement_id,
- *   order_sums) are locking reads, so they see the latest committed rows
- *   and not the transaction's REPEATABLE READ snapshot.
+ * - No locking read on a key that may not exist yet (finding 7 of #6983).
+ *   Under REPEATABLE READ such a read takes a gap lock, and two
+ *   transactions holding the same gap then deadlock on their inserts, so
+ *   two overlapping checkouts (new orders, new batch keys) used to deadlock
+ *   every time. Instead:
+ *   - find_batch() and order_sums() are plain reads unless $current is
+ *     true. A plain read can miss a batch a concurrent winner committed;
+ *     the unique idem_key then refuses the insert and the service re-runs
+ *     with $current true, when the key exists (a record lock, no gap).
+ *   - has_balances() inside a transaction inserts the location 0 row at 0
+ *     when missing (INSERT IGNORE: a record lock, or an insert) and reports
+ *     whether it existed, instead of a locking range read.
+ *   - balances() and last_movement_id() are locking reads of a product's
+ *     rows, which exist by then (has_balances() runs first) and which only a
+ *     holder of that product's `_stock` lock changes.
  *
- * Not guaranteed: freedom from deadlocks. Locking reads on a key that does
- * not exist yet take gap locks, so two transactions on different products
- * can deadlock in rare orders; MySQL then rolls one back and Core_Db::tx
- * retries it (outermost transaction only, 2 retries by default).
+ * Not guaranteed: freedom from deadlocks. The range reads above still lock
+ * the gaps next to the product's rows, so a first touch of a neighboring
+ * product waits for this transaction, and three or more transactions adding
+ * new locations at once can still form a cycle; MySQL then rolls one back
+ * and Core_Db::tx retries it (outermost transaction only, 2 retries by
+ * default).
  *
  * @package Xophz_Compass_Bazaar
  */
@@ -30,9 +43,10 @@ class Xophz_Compass_Bazaar_Stock_Store_Wpdb implements Xophz_Compass_Bazaar_Stoc
     return Xophz_Compass_Bazaar_Core_Db::tx( $fn );
   }
 
-  public function find_batch( string $idem_key ): ?array {
+  public function find_batch( string $idem_key, bool $current = false ): ?array {
+    $lock  = $current ? self::share() : '';
     $batch = Xophz_Compass_Bazaar_Core_Db::get_row(
-      'SELECT * FROM ' . self::t( 'stock_batches' ) . ' WHERE idem_key = %s' . self::share(),
+      'SELECT * FROM ' . self::t( 'stock_batches' ) . ' WHERE idem_key = %s' . $lock,
       [ $idem_key ]
     );
     if ( ! $batch ) {
@@ -40,16 +54,23 @@ class Xophz_Compass_Bazaar_Stock_Store_Wpdb implements Xophz_Compass_Bazaar_Stoc
     }
     $batch = self::batch_row( (array) $batch );
     $lines = Xophz_Compass_Bazaar_Core_Db::get_results(
-      'SELECT * FROM ' . self::t( 'stock_movements' ) . ' WHERE batch_id = %d ORDER BY line_no' . self::share(),
+      'SELECT * FROM ' . self::t( 'stock_movements' ) . ' WHERE batch_id = %d ORDER BY line_no' . $lock,
       [ $batch['id'] ]
     );
     return [ 'batch' => $batch, 'lines' => array_map( [ self::class, 'movement_row' ], array_map( 'get_object_vars', $lines ) ) ];
   }
 
   public function has_balances( int $pid ): bool {
-    return null !== Xophz_Compass_Bazaar_Core_Db::get_var(
-      'SELECT location_id FROM ' . self::t( 'stock_balances' ) . ' WHERE stock_product_id = %d ORDER BY location_id LIMIT 1' . self::exclusive(),
-      [ $pid ]
+    if ( ! Xophz_Compass_Bazaar_Core_Db::in_tx() ) {
+      return null !== Xophz_Compass_Bazaar_Core_Db::get_var(
+        'SELECT location_id FROM ' . self::t( 'stock_balances' ) . ' WHERE stock_product_id = %d ORDER BY location_id LIMIT 1',
+        [ $pid ]
+      );
+    }
+    // Every initialized product has a location 0 row (lock_balances always includes it).
+    return 0 === Xophz_Compass_Bazaar_Core_Db::exec(
+      'INSERT IGNORE INTO ' . self::t( 'stock_balances' ) . ' (stock_product_id, location_id, on_hand, is_enabled, last_movement_id, updated_at) VALUES (%d, 0, 0, 1, 0, %s)',
+      [ $pid, Xophz_Compass_Bazaar_Core_Db::now() ]
     );
   }
 
@@ -125,7 +146,7 @@ class Xophz_Compass_Bazaar_Stock_Store_Wpdb implements Xophz_Compass_Bazaar_Stoc
     );
   }
 
-  public function order_sums( int $order_id ): array {
+  public function order_sums( int $order_id, bool $current = false ): array {
     $out = [ 'items' => [], 'last_movement_id' => 0 ];
     if ( $order_id <= 0 ) {
       return $out;
@@ -133,7 +154,7 @@ class Xophz_Compass_Bazaar_Stock_Store_Wpdb implements Xophz_Compass_Bazaar_Stoc
     $rows = Xophz_Compass_Bazaar_Core_Db::get_results(
       'SELECT m.id, m.order_item_id, m.location_id, m.stock_product_id, m.product_id, m.variation_id, m.qty_delta, b.reason FROM '
         . self::t( 'stock_movements' ) . ' m JOIN ' . self::t( 'stock_batches' ) . ' b ON b.id = m.batch_id'
-        . ' WHERE m.order_id = %d ORDER BY m.id' . self::share(),
+        . ' WHERE m.order_id = %d ORDER BY m.id' . ( $current ? self::share() : '' ),
       [ $order_id ]
     );
     foreach ( $rows as $row ) {

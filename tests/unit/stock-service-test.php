@@ -236,6 +236,45 @@ check( 'order: oversell refused', $code( function () use ( $svc, $meta ) { $svc-
 check( 'order: invariants', $clean( $store, $wc ), [] );
 check( 'after_commit: once per committed batch, never for refused ones', array_column( $wc->commits, 1 ), [ 'sale', 'refund_restock', 'sale_reversal', 'resale' ] );
 
+// Finding 7 of #6983: no locking read before the products are locked, and
+// none on a key that may not exist yet, so overlapping sales take no gap lock.
+$reads = function ( $store, int $tx, bool $before_lock ) {
+  $out = [];
+  foreach ( $store->events as $event ) {
+    if ( $event[0] !== $tx ) {
+      continue;
+    }
+    if ( $before_lock && 'products' === $event[1] ) {
+      break;
+    }
+    if ( 'read' === $event[1] ) {
+      $out[] = $event[2][0] . ( $event[2][1] ? ':current' : ':plain' );
+    }
+  }
+  return $out;
+};
+list( $store, $wc, $svc ) = $fresh();
+$wc->add_product( 5, 10 );
+$svc->ensure_initialized( 5 );
+$sale = [ [ 'order_item_id' => 21, 'product_id' => 5, 'quantity' => 1, 'location_id' => 0 ] ];
+$store->transaction( function () use ( $svc, $sale, $meta ) { $svc->sync_order( 200, true, $sale, $meta ); } );
+check( 'gap locks: a new order sale reads only plain before the product lock', $reads( $store, $store->tx_serial, true ), [ 'order_sums:plain' ] );
+check( 'gap locks: a new order sale makes no current read', $reads( $store, $store->tx_serial, false ), [ 'order_sums:plain', 'find_batch:plain' ] );
+$svc->sync_order( 200, false, $sale, $meta );
+check( 'gap locks: a cancel reads the order current, after the product lock', [ $reads( $store, $store->tx_serial, true ), $reads( $store, $store->tx_serial, false ) ], [ [ 'order_sums:plain' ], [ 'order_sums:plain', 'order_sums:current', 'find_batch:plain' ] ] );
+$svc->adjust( 'adjust:1:gap', 5, 0, -1, 'adjust', $meta );
+check( 'gap locks: an adjust looks its key up with plain reads only', $reads( $store, $store->tx_serial, false ), [ 'find_batch:plain' ] );
+$store->hidden_keys['adjust:1:gap'] = 2;
+$r = $svc->adjust( 'adjust:1:gap', 5, 0, -1, 'adjust', $meta );
+check( 'gap locks: a stale miss ends in the duplicate key, and the re-run reads current', [ $r->replayed(), $wc->stock[5], $reads( $store, $store->tx_serial, false ) ], [ true, 9.0, [ 'find_batch:current' ] ] );
+// A concurrent sale of the same order that this transaction's snapshot misses
+$store->transaction( function () use ( $svc, $meta ) { $svc->sync_order( 201, true, [ [ 'order_item_id' => 22, 'product_id' => 5, 'quantity' => 2, 'location_id' => 0 ] ], $meta ); } );
+$store->hidden_orders[201]                  = 2;
+$store->hidden_keys['order:201:sync:0:c'] = 1;
+$r = $svc->sync_order( 201, true, [ [ 'order_item_id' => 22, 'product_id' => 5, 'quantity' => 2, 'location_id' => 0 ] ], $meta );
+check( 'gap locks: a stale sale of the same order sells once', [ $r->noop() || $r->replayed(), $wc->stock[5], $svc->available( 5, 0 ) ], [ true, 7.0, 7.0 ] );
+check( 'gap locks: invariants', $clean( $store, $wc ), [] );
+
 // Property test: 2000 seeded random operations keep I1 (balance = sum of
 // movements, running balance_after) and I2 (_stock = projectable sum) after
 // every step, refused operations included.

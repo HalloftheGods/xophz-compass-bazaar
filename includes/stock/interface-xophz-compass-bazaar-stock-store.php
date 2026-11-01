@@ -6,6 +6,17 @@
  * transaction(), after it has locked the rows through lock_balances(). The
  * wpdb implementation (WP7) and the in-memory test double implement it.
  *
+ * Reads and locks (finding 7 of #6983): a read with $current false is a
+ * plain read, which inside a transaction may miss rows another transaction
+ * committed after this one's snapshot, and takes no lock. A read with
+ * $current true is a current (locking) read. The service makes no current
+ * read before it has locked the products, and none on a key that may not
+ * exist yet in the normal path, because a locking read of a missing key
+ * takes a gap lock that a concurrent insert of a neighboring key then
+ * deadlocks on. It relies on the unique idem_key instead: a stale miss ends
+ * in Core_Duplicate_Key_Exception on insert_batch, and the re-run reads
+ * with $current true, when the key exists.
+ *
  * Row shapes (keys match the bazaar_stock_* columns of spec 7.1):
  * - batch row: id, idem_key, request_hash, reason, source_type, source_id,
  *   reverses_batch_id, actor_user_id, cashier_user_id, staff_session_id,
@@ -27,10 +38,18 @@ interface Xophz_Compass_Bazaar_Stock_Store {
    */
   public function transaction( callable $fn );
 
-  /** @return array|null ['batch' => row, 'lines' => movement rows by line_no], or null. */
-  public function find_batch( string $idem_key ): ?array;
+  /**
+   * @param bool $current A current (locking) read inside a transaction; otherwise a plain read.
+   * @return array|null ['batch' => row, 'lines' => movement rows by line_no], or null.
+   */
+  public function find_batch( string $idem_key, bool $current = false ): ?array;
 
-  /** True once any balance row exists for the stock product. */
+  /**
+   * True once any balance row exists for the stock product; current inside a
+   * transaction. The wpdb store answers it by inserting the location 0 row
+   * at 0 when it is missing (which lock_balances would do anyway), so it
+   * takes no gap lock.
+   */
   public function has_balances( int $pid ): bool;
 
   /**
@@ -66,8 +85,10 @@ interface Xophz_Compass_Bazaar_Stock_Store {
    *   ]]],
    *   'last_movement_id' => highest movement id of the order, 0 when none,
    * ]
+   *
+   * @param bool $current A current (locking) read inside a transaction; otherwise a plain read.
    */
-  public function order_sums( int $order_id ): array;
+  public function order_sums( int $order_id, bool $current = false ): array;
 
   /** Highest movement id for the stock product at any location, 0 when none. */
   public function last_movement_id( int $pid ): int;

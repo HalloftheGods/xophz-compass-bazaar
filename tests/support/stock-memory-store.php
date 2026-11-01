@@ -10,8 +10,13 @@
  * - Writes outside a transaction, and balance writes to a pair that was not
  *   locked in the current transaction, throw LogicException.
  * - Every lock call is appended to $lock_log as [tx serial, kind, items as passed].
- * - $hidden_keys[key] = n makes find_batch() miss that key n times, which
- *   simulates a concurrent winner that this transaction cannot see yet.
+ * - $hidden_keys[key] = n makes a plain find_batch() miss that key n times,
+ *   which simulates a concurrent winner committed after this transaction's
+ *   snapshot; a current read (the wpdb store's locking read) always sees it.
+ * - $hidden_orders[order_id] = n makes a plain order_sums() see no movement
+ *   for that order n times, likewise.
+ * - $events lists the lock calls and the find_batch / order_sums reads in
+ *   order, as [tx serial, kind, items]; a read's items are [method, current].
  *
  * Loading this file does not register the plugin autoloader.
  */
@@ -31,6 +36,7 @@ foreach ( [
   'stock/class-xophz-compass-bazaar-stock-order-math.php',
   'stock/class-xophz-compass-bazaar-stock-insufficient-exception.php',
   'stock/class-xophz-compass-bazaar-stock-conflict-exception.php',
+  'stock/class-xophz-compass-bazaar-stock-resolver.php',
   'stock/class-xophz-compass-bazaar-stock-service.php',
 ] as $bazaar_file ) {
   require_once $bazaar_root . '/includes/' . $bazaar_file;
@@ -57,6 +63,12 @@ class Bazaar_Test_Stock_Memory_Store implements Xophz_Compass_Bazaar_Stock_Store
 
   /** @var array key => remaining misses */
   public $hidden_keys = [];
+
+  /** @var array order_id => remaining empty plain reads */
+  public $hidden_orders = [];
+
+  /** @var array[] [tx serial, 'products'|'balances'|'read', items] in call order */
+  public $events = [];
 
   /** @var int Outermost transactions started. */
   public $tx_serial = 0;
@@ -90,6 +102,7 @@ class Bazaar_Test_Stock_Memory_Store implements Xophz_Compass_Bazaar_Stock_Store
 
   public function record_lock( string $kind, array $items ): void {
     $this->lock_log[] = [ $this->tx_serial, $kind, $items ];
+    $this->events[]   = [ $this->tx_serial, $kind, $items ];
   }
 
   public function snapshot(): array {
@@ -133,8 +146,9 @@ class Bazaar_Test_Stock_Memory_Store implements Xophz_Compass_Bazaar_Stock_Store
     return $result;
   }
 
-  public function find_batch( string $idem_key ): ?array {
-    if ( ! empty( $this->hidden_keys[ $idem_key ] ) ) {
+  public function find_batch( string $idem_key, bool $current = false ): ?array {
+    $this->events[] = [ $this->tx_serial, 'read', [ 'find_batch', $current ] ];
+    if ( ! $current && ! empty( $this->hidden_keys[ $idem_key ] ) ) {
       $this->hidden_keys[ $idem_key ]--;
       return null;
     }
@@ -206,9 +220,14 @@ class Bazaar_Test_Stock_Memory_Store implements Xophz_Compass_Bazaar_Stock_Store
     $this->rows[ $this->locked_key( $pid, $loc ) ]['is_enabled'] = $enabled;
   }
 
-  public function order_sums( int $order_id ): array {
-    $items = [];
-    $last  = 0;
+  public function order_sums( int $order_id, bool $current = false ): array {
+    $this->events[] = [ $this->tx_serial, 'read', [ 'order_sums', $current ] ];
+    $items          = [];
+    $last           = 0;
+    if ( ! $current && ! empty( $this->hidden_orders[ $order_id ] ) ) {
+      $this->hidden_orders[ $order_id ]--;
+      return [ 'items' => [], 'last_movement_id' => 0 ];
+    }
     foreach ( $this->movements as $m ) {
       if ( $m['order_id'] !== $order_id || $order_id <= 0 ) {
         continue;

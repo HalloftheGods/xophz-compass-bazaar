@@ -12,6 +12,10 @@
 # - 8 parallel processes subtracting 1 from stock 5 with distinct keys give
 #   exactly 5 successes and 3 insufficient_stock, ending at `_stock` 0 and balance 0;
 # - 5 parallel calls with one key write one batch and subtract once;
+# - two ledger sales that overlap (each sleeps before its first insert, with
+#   no deadlock retry allowed) never deadlock: two orders for the last unit
+#   of one product give one sale and one insufficient_stock, and two orders
+#   for different products both sell (finding 7 of #6983);
 # - a multi-inventory product keeps disabled-location stock out of `_stock`
 #   and mirrors its balances into _compass_multi_inventory;
 # - ledger mode is refused while there is drift, unless forced with a reason;
@@ -60,7 +64,7 @@ rest_bg() {
 }
 
 setup="$(fix setup | tail -1)"
-for name in P1 P2 P3 P4 P5 W1 W2 ADMIN; do
+for name in P1 P2 P3 P4 P5 C1 C2 C3 W1 W2 ADMIN; do
   printf -v "$name" '%s' "$(jget "$setup" "$name")"
 done
 SAVED="$(jget "$setup" saved)"
@@ -70,14 +74,22 @@ if [ -z "${P5:-}" ] || [ -z "${W2:-}" ]; then
 fi
 CLEANED=0
 run_cleanup() {
-  fix cleanup -e PIDS="$P1,$P2,$P3,$P4,$P5" -e WIDS="$W1,$W2" -e SAVED="$SAVED"
+  fix cleanup -e PIDS="$P1,$P2,$P3,$P4,$P5,$C1,$C2,$C3" -e WIDS="$W1,$W2" -e SAVED="$SAVED"
 }
 cleanup() {
   [ "$CLEANED" -eq 1 ] || run_cleanup >/dev/null
   rm -rf "$SCRATCH"
 }
 trap cleanup EXIT
-IDS=(-e P1="$P1" -e P2="$P2" -e P3="$P3" -e P4="$P4" -e P5="$P5" -e W1="$W1" -e W2="$W2" -e ADMIN="$ADMIN")
+IDS=(-e P1="$P1" -e P2="$P2" -e P3="$P3" -e P4="$P4" -e P5="$P5" -e C1="$C1" -e C2="$C2" -e C3="$C3" -e W1="$W1" -e W2="$W2" -e ADMIN="$ADMIN")
+
+# fix_bg <outfile> <action> [docker -e flags...] : one fixture action in its own process (safe in parallel; the file is already copied).
+fix_bg() {
+  local file="$1" action="$2"
+  shift 2
+  docker exec -e FIX_ACTION="$action" -e RUN="$RUN" "$@" "$CONTAINER" \
+    wp --allow-root --path="$WP_PATH" eval-file /tmp/bazaar-stock-ledger-fixtures.php 2>&1 | bz_filter | tail -1 >"$file"
+}
 
 # Modes, lazy init, adjustments, movements, multi-inventory (ledger mode)
 out="$(fix seq_ledger "${IDS[@]}")"
@@ -147,6 +159,29 @@ wait
 expect_equal 'same key: all 5 calls answer 200' "$(cat "$SCRATCH"/same-* | grep -c '"status":200')" '5'
 expect_equal 'same key: one fresh result, four replays' "$(cat "$SCRATCH"/same-* | grep -c '"replayed":true')" '4'
 
+# Overlapping ledger sales: every read done before either writes, no deadlock retry allowed
+orders="$(fix conc_orders "${IDS[@]}" | tail -1)"
+for name in O1 O2 O3 O4; do
+  printf -v "$name" '%s' "$(jget "$orders" "$name")"
+done
+fix_bg "$SCRATCH/conc-1" conc_run -e ORDER="$O1" -e DELAY_MS=8000 &
+fix_bg "$SCRATCH/conc-2" conc_run -e ORDER="$O2" -e DELAY_MS=8000 &
+wait
+expect_equal 'overlap, last unit: no deadlock' "$(cat "$SCRATCH"/conc-1 "$SCRATCH"/conc-2 | grep -c 'deadlock')" '0'
+expect_equal 'overlap, last unit: one sale' "$(cat "$SCRATCH"/conc-1 "$SCRATCH"/conc-2 | grep -c '^conc.result=ok$')" '1'
+expect_equal 'overlap, last unit: one insufficient_stock' "$(cat "$SCRATCH"/conc-1 "$SCRATCH"/conc-2 | grep -c '^conc.result=insufficient_stock$')" '1'
+fix_bg "$SCRATCH/conc-3" conc_run -e ORDER="$O3" -e DELAY_MS=8000 &
+fix_bg "$SCRATCH/conc-4" conc_run -e ORDER="$O4" -e DELAY_MS=8000 &
+wait
+expect_equal 'overlap, two products: no deadlock' "$(cat "$SCRATCH"/conc-3 "$SCRATCH"/conc-4 | grep -c 'deadlock')" '0'
+expect_equal 'overlap, two products: both sell' "$(cat "$SCRATCH"/conc-3 "$SCRATCH"/conc-4 | grep -c '^conc.result=ok$')" '2'
+out="$(fix conc_check "${IDS[@]}")"
+expect 'overlap: the last unit is sold once' "$out" 'conc.C1.wc=0'
+expect 'overlap: the last unit balance is 0' "$out" 'conc.C1.bal0=0'
+expect 'overlap: product a sold once' "$out" 'conc.C2.wc=4'
+expect 'overlap: product b sold once' "$out" 'conc.C3.wc=4'
+expect 'overlap: the refused order is cancelled' "$out" 'conc.cancelled=1'
+
 # Parallel results, drift, shadow mode
 out="$(fix seq_drift "${IDS[@]}")"
 expect 'parallel: _stock ends at 0' "$out" 'par.P2.wc=0'
@@ -177,8 +212,9 @@ expect 'shadow: a warehouse adjustment is 422 unsupported_field' "$out" 'shadow.
 # Cleanup now (the EXIT trap only covers an early exit), then check it left nothing.
 out="$(run_cleanup)"
 CLEANED=1
-expect 'cleanup: trashes the 5 products and 2 warehouses' "$out" 'cleanup.trashed=7'
-expect 'cleanup: force-deletes the 5 products and 2 warehouses' "$out" 'cleanup.deleted=7'
+expect 'cleanup: trashes the 4 orders' "$out" 'cleanup.orders=4'
+expect 'cleanup: trashes the 8 products and 2 warehouses' "$out" 'cleanup.trashed=10'
+expect 'cleanup: force-deletes the 8 products and 2 warehouses' "$out" 'cleanup.deleted=10'
 expect 'cleanup: no row the cleanup targeted is left' "$out" 'cleanup.rows_left=0'
 expect 'cleanup: no stock batch carries the run key' "$out" 'cleanup.run_batches=0'
 expect 'cleanup: no outbox payload mentions the run' "$out" 'cleanup.run_events=0'
