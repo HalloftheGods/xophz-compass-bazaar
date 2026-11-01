@@ -5,13 +5,15 @@
  * Spec: docs/plugins/bazaar-core-v2.md section 13.1.
  * - A PIN is 4 to 8 digits. Twenty very common PINs are refused.
  * - Hashing uses wp_hash_password; checking uses wp_check_password.
- * - Lockout: one UPDATE counts a failure and sets the lock on the fifth.
- *   A locked PIN is refused (423 pin_locked, data.locked_until) without
- *   being checked, even when the PIN is right.
- * - Per-device throttle: 20 failures per 15 minutes across all staff, kept in
- *   a transient. The count is read and written in two steps, so two requests
- *   at the same instant can undercount by one; it is a brake, not a counter
- *   of record.
+ * - Lockout: one atomic UPDATE claims the attempt before the PIN is checked
+ *   and sets the lock on the fifth, so parallel guesses cannot all be checked
+ *   while the row still looks unlocked (#6986). A locked PIN is refused
+ *   (423 pin_locked, data.locked_until) without being checked, even when the
+ *   PIN is right. A right PIN clears the count.
+ * - Throttle: 20 failures per 15 minutes per device (X-Bazaar-Device), 20 per
+ *   logged-in operator and 60 per remote address, across all staff, counted
+ *   by Staff_Throttle before the check. The device id is client-chosen, so
+ *   the operator and address caps are what an attacker cannot step around.
  * - The outbox records staff.pin.locked and staff.pin.set.
  *
  * Failure counts are written outside any caller transaction on purpose: a
@@ -23,13 +25,13 @@
  */
 class Xophz_Compass_Bazaar_Staff_Pins {
 
-  const MIN_LENGTH        = 4;
-  const MAX_LENGTH        = 8;
-  const MAX_FAILURES      = 5;
-  const LOCK_SECONDS      = 900;
-  const DEVICE_MAX        = 20;
-  const DEVICE_WINDOW     = 900;
-  const DEVICE_KEY_PREFIX = 'bazaar_pin_dev_';
+  const MIN_LENGTH   = 4;
+  const MAX_LENGTH   = 8;
+  const MAX_FAILURES = 5;
+  const LOCK_SECONDS = 900;
+  const DEVICE_MAX   = 20;
+  const OPERATOR_MAX = 20;
+  const IP_MAX       = 60;
 
   const COMMON = [
     '0000', '1111', '2222', '3333', '4444', '5555', '6666', '7777', '8888', '9999',
@@ -64,19 +66,25 @@ class Xophz_Compass_Bazaar_Staff_Pins {
     return '';
   }
 
-  /** Next throttle state after a failure at $now. State: ['n' => failures, 't' => window start]. */
-  public static function throttle_next( $state, int $now ): array {
-    if ( ! is_array( $state ) || ! isset( $state['n'], $state['t'] ) || $now - (int) $state['t'] >= self::DEVICE_WINDOW ) {
-      return [ 'n' => 1, 't' => $now ];
+  /**
+   * Throttle buckets for one PIN attempt: bucket => failures allowed per
+   * 15-minute window. The device id comes from the client's X-Bazaar-Device
+   * header, so it is never the only key: the logged-in operator and the
+   * remote address are capped too. A missing device counts as one shared
+   * device; operator 0 and an empty or invalid address add no bucket.
+   *
+   * @return array<string,int>
+   */
+  public static function throttle_buckets( string $device_id, int $operator_user_id, string $remote_ip ): array {
+    $buckets = [ 'pin:device:' . ( '' === $device_id ? 'none' : $device_id ) => self::DEVICE_MAX ];
+    if ( $operator_user_id > 0 ) {
+      $buckets[ 'pin:operator:' . $operator_user_id ] = self::OPERATOR_MAX;
     }
-    return [ 'n' => (int) $state['n'] + 1, 't' => (int) $state['t'] ];
-  }
-
-  /** True when the state says this device used up its failures and the window is still open. */
-  public static function throttle_blocked( $state, int $now ): bool {
-    return is_array( $state ) && isset( $state['n'], $state['t'] )
-      && $now - (int) $state['t'] < self::DEVICE_WINDOW
-      && (int) $state['n'] >= self::DEVICE_MAX;
+    $ip = Xophz_Compass_Bazaar_Staff_Throttle::ip_key( $remote_ip );
+    if ( '' !== $ip ) {
+      $buckets[ 'pin:ip:' . $ip ] = self::IP_MAX;
+    }
+    return $buckets;
   }
 
   /** Whether a locked_until value ('Y-m-d H:i:s' UTC or empty) is still in the future at $now. */
@@ -91,35 +99,30 @@ class Xophz_Compass_Bazaar_Staff_Pins {
   /**
    * Check $pin for $user_id. Returns normally on success and clears the
    * failure count. Otherwise throws Core_Http_Error:
-   * - 429 pin_throttled: the device used its failures.
+   * - 429 pin_throttled: the device, the operator or the address used its failures.
    * - 423 pin_locked (data.locked_until): the PIN is locked.
    * - 403 pin_invalid: wrong PIN, no PIN set, or the staff row is inactive.
+   *
+   * The throttle slot and the attempt are both claimed before the slow hash
+   * check. A right PIN and a refusal for a lock give the throttle slot back,
+   * so only wrong PINs count against it.
    *
    * @throws Xophz_Compass_Bazaar_Core_Http_Error
    */
   public static function verify( int $user_id, string $pin, string $device_id = '' ): void {
-    $now       = time();
-    $throttle  = self::device_key( $device_id );
-    if ( self::throttle_blocked( get_transient( $throttle ), $now ) ) {
-      throw new Xophz_Compass_Bazaar_Core_Http_Error( 'pin_throttled', 'Too many wrong PINs from this device. Try again in a few minutes.', 429 );
+    $window  = Xophz_Compass_Bazaar_Staff_Throttle::window( time() );
+    $buckets = self::throttle_buckets( $device_id, get_current_user_id(), Xophz_Compass_Bazaar_Staff_Throttle::remote_ip() );
+    if ( ! Xophz_Compass_Bazaar_Staff_Throttle::claim( $buckets, $window ) ) {
+      throw new Xophz_Compass_Bazaar_Core_Http_Error( 'pin_throttled', 'Too many wrong PINs from this till. Try again in a few minutes.', 429 );
     }
-    $table = Xophz_Compass_Bazaar_Core_Db::table( 'staff' );
-    $row   = Xophz_Compass_Bazaar_Core_Db::get_row( "SELECT pin_hash, failed_attempts, locked_until, active FROM $table WHERE user_id = %d", [ $user_id ] );
-    if ( $row && self::is_locked( $row->locked_until, $now ) ) {
-      throw self::locked_error( (string) $row->locked_until );
-    }
-    $enrolled = $row && (int) $row->active === 1 && '' !== (string) $row->pin_hash;
-    if ( $enrolled && '' === self::format_error( $pin ) && wp_check_password( $pin, (string) $row->pin_hash ) ) {
-      if ( (int) $row->failed_attempts > 0 ) {
-        Xophz_Compass_Bazaar_Core_Db::exec( "UPDATE $table SET failed_attempts = 0, locked_until = NULL, updated_at = %s WHERE user_id = %d", [ Xophz_Compass_Bazaar_Core_Db::now(), $user_id ] );
+    $wrong = false;
+    try {
+      self::check( $user_id, $pin, $wrong );
+    } finally {
+      if ( ! $wrong ) {
+        Xophz_Compass_Bazaar_Staff_Throttle::release( $buckets, $window );
       }
-      return;
     }
-    set_transient( $throttle, self::throttle_next( get_transient( $throttle ), $now ), self::DEVICE_WINDOW );
-    if ( $enrolled ) {
-      self::count_failure( $user_id, (int) $row->failed_attempts );
-    }
-    throw new Xophz_Compass_Bazaar_Core_Http_Error( 'pin_invalid', 'The PIN is not correct.', 403 );
   }
 
   /**
@@ -153,34 +156,97 @@ class Xophz_Compass_Bazaar_Staff_Pins {
     return null !== Xophz_Compass_Bazaar_Core_Db::get_var( "SELECT user_id FROM $table WHERE user_id = %d AND active = 1 AND pin_hash <> ''", [ $user_id ] );
   }
 
-  private static function device_key( string $device_id ): string {
-    return self::DEVICE_KEY_PREFIX . md5( '' === $device_id ? 'none' : $device_id );
+  /**
+   * The lockout and the PIN check. Sets $wrong when the attempt counts as a
+   * wrong PIN (which keeps its throttle slot).
+   *
+   * @throws Xophz_Compass_Bazaar_Core_Http_Error
+   */
+  private static function check( int $user_id, string $pin, bool &$wrong ): void {
+    $table = Xophz_Compass_Bazaar_Core_Db::table( 'staff' );
+    $row   = Xophz_Compass_Bazaar_Core_Db::get_row( "SELECT pin_hash, locked_until, active FROM $table WHERE user_id = %d", [ $user_id ] );
+    if ( $row && self::is_locked( $row->locked_until, time() ) ) {
+      throw self::locked_error( (string) $row->locked_until );
+    }
+    if ( ! $row || 1 !== (int) $row->active || '' === (string) $row->pin_hash ) {
+      $wrong = true;
+      throw self::invalid_error();
+    }
+    $attempt = self::claim_attempt( $user_id );
+    if ( 0 === $attempt ) {
+      // Locked by a parallel attempt since the read, or deactivated meanwhile.
+      $locked = (string) self::locked_until( $user_id );
+      if ( self::is_locked( $locked, time() ) ) {
+        throw self::locked_error( $locked );
+      }
+      $wrong = true;
+      throw self::invalid_error();
+    }
+    $set_lock = $attempt >= self::MAX_FAILURES;
+    if ( '' === self::format_error( $pin ) && wp_check_password( $pin, (string) $row->pin_hash ) ) {
+      self::clear_attempts( $user_id, $set_lock );
+      return;
+    }
+    $wrong = true;
+    if ( $set_lock ) {
+      $locked = (string) self::locked_until( $user_id );
+      Xophz_Compass_Bazaar_Events_Outbox::record( 'staff.pin.locked', 'staff', $user_id, [ 'locked_until' => $locked ], $user_id );
+      throw self::locked_error( $locked );
+    }
+    throw self::invalid_error();
+  }
+
+  /**
+   * Count one attempt before the PIN is checked. One UPDATE adds it, sets
+   * locked_until on the fifth (and restarts the count), and matches no row
+   * while the PIN is locked, inactive or unset. Returns this attempt's number
+   * in the run (1 to MAX_FAILURES), or 0 when no row was claimed.
+   *
+   * locked_until is assigned first, from the old failed_attempts, because
+   * MySQL evaluates SET assignments left to right. LAST_INSERT_ID(expr) hands
+   * this connection the new number, so no second read can race another
+   * request.
+   */
+  private static function claim_attempt( int $user_id ): int {
+    $table   = Xophz_Compass_Bazaar_Core_Db::table( 'staff' );
+    $max     = self::MAX_FAILURES;
+    $claimed = Xophz_Compass_Bazaar_Core_Db::exec(
+      "UPDATE $table SET locked_until = IF(failed_attempts + 1 >= $max, DATE_ADD(UTC_TIMESTAMP(), INTERVAL " . self::LOCK_SECONDS . " SECOND), locked_until),
+         failed_attempts = IF(LAST_INSERT_ID(failed_attempts + 1) >= $max, 0, failed_attempts + 1), updated_at = %s
+       WHERE user_id = %d AND active = 1 AND pin_hash <> '' AND (locked_until IS NULL OR locked_until <= UTC_TIMESTAMP())",
+      [ Xophz_Compass_Bazaar_Core_Db::now(), $user_id ]
+    );
+    if ( 1 !== $claimed ) {
+      return 0;
+    }
+    return max( 1, (int) Xophz_Compass_Bazaar_Core_Db::get_var( 'SELECT LAST_INSERT_ID()' ) );
+  }
+
+  /**
+   * A right PIN clears the count. When this attempt set the lock it clears
+   * that lock too; otherwise a lock that a parallel wrong PIN set meanwhile
+   * stays.
+   */
+  private static function clear_attempts( int $user_id, bool $own_lock ): void {
+    $table = Xophz_Compass_Bazaar_Core_Db::table( 'staff' );
+    $sql   = "UPDATE $table SET failed_attempts = 0, locked_until = NULL, updated_at = %s WHERE user_id = %d";
+    if ( ! $own_lock ) {
+      $sql .= ' AND (locked_until IS NULL OR locked_until <= UTC_TIMESTAMP())';
+    }
+    Xophz_Compass_Bazaar_Core_Db::exec( $sql, [ Xophz_Compass_Bazaar_Core_Db::now(), $user_id ] );
+  }
+
+  /** @return string|null */
+  private static function locked_until( int $user_id ) {
+    $table = Xophz_Compass_Bazaar_Core_Db::table( 'staff' );
+    return Xophz_Compass_Bazaar_Core_Db::get_var( "SELECT locked_until FROM $table WHERE user_id = %d", [ $user_id ] );
   }
 
   private static function locked_error( string $locked_until ): Xophz_Compass_Bazaar_Core_Http_Error {
     return new Xophz_Compass_Bazaar_Core_Http_Error( 'pin_locked', 'This PIN is locked after too many wrong attempts.', 423, [ 'locked_until' => $locked_until ] );
   }
 
-  /**
-   * One UPDATE counts the failure; the fifth sets the lock and starts the
-   * count again. locked_until is assigned first because MySQL evaluates
-   * SET assignments left to right.
-   */
-  private static function count_failure( int $user_id, int $before ): void {
-    $table = Xophz_Compass_Bazaar_Core_Db::table( 'staff' );
-    $max   = self::MAX_FAILURES;
-    Xophz_Compass_Bazaar_Core_Db::exec(
-      "UPDATE $table SET locked_until = IF(failed_attempts + 1 >= $max, DATE_ADD(UTC_TIMESTAMP(), INTERVAL " . self::LOCK_SECONDS . " SECOND), locked_until),
-         failed_attempts = IF(failed_attempts + 1 >= $max, 0, failed_attempts + 1), updated_at = %s WHERE user_id = %d",
-      [ Xophz_Compass_Bazaar_Core_Db::now(), $user_id ]
-    );
-    if ( $before + 1 < $max ) {
-      return;
-    }
-    $locked = Xophz_Compass_Bazaar_Core_Db::get_var( "SELECT locked_until FROM $table WHERE user_id = %d", [ $user_id ] );
-    if ( self::is_locked( (string) $locked, time() ) ) {
-      Xophz_Compass_Bazaar_Events_Outbox::record( 'staff.pin.locked', 'staff', $user_id, [ 'locked_until' => (string) $locked ], $user_id );
-      throw self::locked_error( (string) $locked );
-    }
+  private static function invalid_error(): Xophz_Compass_Bazaar_Core_Http_Error {
+    return new Xophz_Compass_Bazaar_Core_Http_Error( 'pin_invalid', 'The PIN is not correct.', 403 );
   }
 }

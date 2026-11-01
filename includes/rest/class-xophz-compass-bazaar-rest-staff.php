@@ -13,7 +13,8 @@
  *
  * Errors use {code, message, data:{status}}; none answers 401 except the
  * guard's rest_not_logged_in. PIN errors: 403 pin_invalid, 423 pin_locked,
- * 429 pin_throttled, 422 pin_format.
+ * 429 pin_throttled, 422 pin_format. Password proof errors: 403
+ * proof_invalid, 403 proof_locked.
  *
  * @package Xophz_Compass_Bazaar
  */
@@ -77,9 +78,10 @@ class Xophz_Compass_Bazaar_Rest_Staff {
   }
 
   /**
-   * Set the acting user's own PIN. The proof is the current PIN (lockout
-   * applies) or the current WordPress password. Wrong passwords are not
-   * counted or locked here.
+   * Set the acting user's own PIN. The proof is the current PIN (lockout and
+   * throttle apply) or the current WordPress password (Staff_Password_Proof:
+   * five wrong per user per 15 minutes, then 403 proof_locked; each wrong one
+   * fires wp_login_failed).
    */
   public function set_own_pin( $request ) {
     return Xophz_Compass_Bazaar_Core_Rest::handle( function () use ( $request ) {
@@ -90,10 +92,7 @@ class Xophz_Compass_Bazaar_Rest_Staff {
       if ( isset( $body['current_pin'] ) && is_scalar( $body['current_pin'] ) && '' !== (string) $body['current_pin'] ) {
         Xophz_Compass_Bazaar_Staff_Pins::verify( $uid, (string) $body['current_pin'], $context->device_id );
       } elseif ( isset( $body['current_password'] ) && is_string( $body['current_password'] ) && '' !== $body['current_password'] ) {
-        $user = get_userdata( $uid );
-        if ( ! $user || ! wp_check_password( $body['current_password'], $user->user_pass, $uid ) ) {
-          throw new Xophz_Compass_Bazaar_Core_Http_Error( 'proof_invalid', 'The current password is not correct.', 403 );
-        }
+        Xophz_Compass_Bazaar_Staff_Password_Proof::verify( $uid, $body['current_password'] );
       } else {
         throw new Xophz_Compass_Bazaar_Core_Http_Error( 'invalid_request', 'Send current_pin or current_password.', 400, [ 'errors' => [ 'current_pin', 'current_password' ] ] );
       }

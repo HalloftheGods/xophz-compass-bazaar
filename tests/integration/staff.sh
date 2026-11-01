@@ -8,11 +8,17 @@
 # locked), approvals (requester and approver rules, PIN check, one use,
 # subject/requester/amount binding, expiry), the cashier default limits, and
 # that no staff route answers 401 for a logged-in caller.
+# Review fixes (#6986): twelve parallel wrong PINs cannot get past the
+# lockout, the throttle counter holds under a parallel burst, rotating
+# X-Bazaar-Device values does not escape the per-operator cap, and wrong
+# current passwords on PUT /pos/staff/me/pin are counted, locked (403
+# proof_locked) and reported through wp_login_failed.
 #
-# Creates five throwaway users (login prefix bzrstaff_) and their staff,
+# Creates eight throwaway users (login prefix bzrstaff_) and their staff,
 # session, approval and event rows. A trap deletes them, also on failure.
-# Wrong-PIN counts use unique X-Bazaar-Device values, and their throttle
-# transients are deleted at the end.
+# Wrong-PIN counts use unique X-Bazaar-Device values. The throttle counter
+# rows (wp_options, see Staff_Throttle) for this run's devices, users and
+# test bucket are deleted at the end, as are the burst's temp files.
 #
 # Run from the repo root: bash wp-content/plugins/xophz-compass-bazaar/tests/integration/staff.sh
 set -u
@@ -22,6 +28,7 @@ source "$HERE/lib.sh"
 
 P='Xophz_Compass_Bazaar'
 RUN="$(date +%s)"
+PAR="$(mktemp -d)"
 
 # PHP helper prepended to every call: run one REST request as a user, with headers.
 PRE='function bzcall($m,$r,$b,$u,$h=[]){ wp_set_current_user($u); $q=new WP_REST_Request($m,$r); foreach($h as $k=>$v){$q->set_header($k,$v);} if($b!==""){$q->set_header("Content-Type","application/json");$q->set_body($b);} $res=rest_do_request($q); return ["status"=>$res->get_status(),"data"=>rest_get_server()->response_to_data($res,false)]; }'
@@ -36,6 +43,13 @@ cleanup() {
   wp_eval "
 global \$wpdb; require_once ABSPATH . 'wp-admin/includes/user.php';
 \$ids = get_users(['search' => 'bzrstaff_*', 'search_columns' => ['user_login'], 'fields' => 'ID']);
+\$T = '${P}_Staff_Throttle'; \$w = \$T::window(time());
+\$bk = ['test:burst:$RUN', 'pin:device:dev-op-$RUN-fresh', 'pin:device:dev-op-$RUN-other'];
+foreach (['a', 'b', 'lock', 'x'] as \$d) { \$bk[] = 'pin:device:dev-' . \$d . '-$RUN'; }
+for (\$i = 0; \$i < 20; \$i++) { \$bk[] = 'pin:device:dev-op-$RUN-' . \$i; }
+for (\$i = 1; \$i <= 12; \$i++) { \$bk[] = 'pin:device:dev-par-$RUN-' . \$i; }
+foreach (\$ids as \$id) { \$bk[] = 'pin:operator:' . \$id; \$bk[] = 'password:user:' . \$id; }
+if (class_exists(\$T)) { foreach (\$bk as \$b) { for (\$x = \$T::window($RUN) - 1; \$x <= \$w; \$x++) { \$wpdb->delete(\$wpdb->options, ['option_name' => \$T::option_name(\$b, \$x)]); } } }
 foreach (\$ids as \$id) {
   \$wpdb->delete(${P}_Core_Db::table('staff'), ['user_id' => \$id]);
   \$wpdb->query(\$wpdb->prepare('DELETE FROM ' . ${P}_Core_Db::table('staff_sessions') . ' WHERE staff_user_id = %d OR operator_user_id = %d', \$id, \$id));
@@ -44,11 +58,13 @@ foreach (\$ids as \$id) {
   wp_delete_user(\$id);
 }
 \$wpdb->query('DELETE FROM ' . ${P}_Core_Db::table('events') . \" WHERE type IN ('staff.pin.set','staff.pin.locked','staff.session.started','approval.granted') AND aggregate_type IN ('staff','staff_session','approval') AND actor_user_id = 0\");
-foreach (['dev-a-$RUN','dev-b-$RUN','dev-lock-$RUN','dev-x-$RUN'] as \$d) { delete_transient(${P}_Staff_Pins::DEVICE_KEY_PREFIX . md5(\$d)); }
 " >/dev/null 2>&1
+  rm -rf "$PAR"
+  docker exec "$CONTAINER" sh -c "rm -f /tmp/bzr-ready-*-$RUN-* /tmp/bzr-go-*-$RUN" >/dev/null 2>&1
 }
 trap cleanup EXIT
 cleanup
+mkdir -p "$PAR"
 
 out="$(wp_eval "echo ${P}_Schema_Installer::install() ? 'installed' : 'incomplete';")"
 expect 'schema: tables present' "$out" 'installed'
@@ -59,10 +75,26 @@ mk() { wp_eval "
 \$id = wp_insert_user(['user_login' => 'bzrstaff_$1_$RUN', 'user_pass' => wp_generate_password(24), 'user_email' => 'bzrstaff_$1_$RUN@example.invalid', 'display_name' => 'Bzr $1', 'role' => \$role]);
 echo is_wp_error(\$id) ? 'ERR' : \$id;"; }
 OP="$(mk op bazaar_cashier)"; A="$(mk a bazaar_cashier)"; B="$(mk b bazaar_cashier)"; MGR="$(mk mgr bazaar_supervisor)"; PLAIN="$(mk plain subscriber)"
+# C is the target of the parallel burst; OP2 and OP3 are operators whose throttle counts start clean.
+C="$(mk c bazaar_cashier)"; OP2="$(mk op2 bazaar_cashier)"; OP3="$(mk op3 bazaar_cashier)"
 ADMIN="$(wp_eval "echo get_users(['role' => 'administrator', 'number' => 1, 'fields' => 'ID'])[0];")"
-for v in "$OP" "$A" "$B" "$MGR" "$PLAIN" "$ADMIN"; do
+for v in "$OP" "$A" "$B" "$MGR" "$PLAIN" "$C" "$OP2" "$OP3" "$ADMIN"; do
   case "$v" in ''|*[!0-9]*) echo "FAIL setup: could not create users (got '$v')"; exit 1;; esac
 done
+
+# Parallel bursts: each background process boots WordPress, touches a ready
+# file, then spins until the go file exists, so all of them hit the database at
+# the same instant however slow the boot is.
+burst_wait() { # burst_wait <tag> <i>: PHP that blocks until burst_go releases the burst
+  echo "@touch('/tmp/bzr-ready-$1-$RUN-$2'); \$bzend = time() + 300; while (! file_exists('/tmp/bzr-go-$1-$RUN') && time() < \$bzend) { usleep(5000); clearstatcache(); }"
+}
+burst_go() { # burst_go <tag> <n>: wait (at most 300s) for n ready files, then release them
+  local end=$(( $(date +%s) + 300 ))
+  while [ "$(docker exec "$CONTAINER" sh -c "ls /tmp/bzr-ready-$1-$RUN-* 2>/dev/null | wc -l")" -lt "$2" ] && [ "$(date +%s)" -lt "$end" ]; do
+    docker exec "$CONTAINER" true
+  done
+  docker exec "$CONTAINER" touch "/tmp/bzr-go-$1-$RUN"
+}
 
 DA="['X-Bazaar-Device'=>'dev-a-$RUN']"
 DB="['X-Bazaar-Device'=>'dev-b-$RUN']"
@@ -76,7 +108,7 @@ out="$(call PUT "/bazaar/v1/pos/staff/$A/pin" '{"pin":"2947"}' "$OP")"
 expect 'pin: a cashier cannot set another PIN (403 forbidden)' "$out" '"code":"forbidden"'
 out="$(call PUT "/bazaar/v1/pos/staff/$A/pin" '{"pin":"2947"}' 0)"
 expect 'pin: logged out is the only 401' "$out" '"status":401'
-for pair in "$A:2947" "$B:5821" "$MGR:7309" "$PLAIN:4063"; do
+for pair in "$A:2947" "$B:5821" "$MGR:7309" "$PLAIN:4063" "$C:3958"; do
   out="$(call PUT "/bazaar/v1/pos/staff/${pair%%:*}/pin" "{\"pin\":\"${pair##*:}\"}" "$ADMIN")"
   expect "pin: manager sets PIN for ${pair%%:*}" "$out" '"updated":true'
 done
@@ -159,6 +191,22 @@ out="$(wp_eval "global \$wpdb; \$wpdb->query(\$wpdb->prepare('UPDATE ' . ${P}_Co
 out="$(call POST /bazaar/v1/pos/staff/sessions "{\"staff_user_id\":$B,\"pin\":\"5821\"}" "$OP" "$DL")"
 expect 'lockout: the right PIN works once the lock has passed' "$out" '"status":200'
 
+# Lockout race (#6986): twelve wrong PINs for C fired at the same instant from
+# separate processes (separate DB connections), each with its own device. The
+# attempt is counted before the PIN is checked, so four get pin_invalid, the
+# fifth sets the lock and the other seven are refused without a check.
+for i in $(seq 1 12); do
+  wp_eval "$PRE $(burst_wait pin "$i") echo wp_json_encode(bzcall('POST','/bazaar/v1/pos/staff/sessions','{\"staff_user_id\":$C,\"pin\":\"$((6000 + i))\"}',$OP2,['X-Bazaar-Device'=>'dev-par-$RUN-$i']));" >"$PAR/pin-$i" &
+done
+burst_go pin 12
+wait
+expect_equal 'lockout race: only four of twelve parallel wrong PINs are checked and refused as pin_invalid' "$(cat "$PAR"/pin-* | grep -c '"code":"pin_invalid"')" '4'
+expect_equal 'lockout race: the other eight get 423 pin_locked' "$(cat "$PAR"/pin-* | grep -c '"code":"pin_locked"')" '8'
+out="$(wp_eval "global \$wpdb; \$r = \$wpdb->get_row(\$wpdb->prepare('SELECT failed_attempts, locked_until FROM ' . ${P}_Core_Db::table('staff') . ' WHERE user_id = %d', $C)); echo ${P}_Staff_Pins::is_locked(\$r->locked_until, time()) ? 'locked' : 'open', ',attempts=', \$r->failed_attempts, ',events=', \$wpdb->get_var('SELECT COUNT(*) FROM ' . ${P}_Core_Db::table('events') . \" WHERE type = 'staff.pin.locked' AND aggregate_id = $C\");")"
+expect_equal 'lockout race: C is locked with the count restarted and one staff.pin.locked event' "$out" 'locked,attempts=0,events=1'
+out="$(call POST /bazaar/v1/pos/staff/sessions "{\"staff_user_id\":$C,\"pin\":\"3958\"}" "$OP2" "['X-Bazaar-Device'=>'dev-par-$RUN-1']")"
+expect 'lockout race: the right PIN is refused while locked' "$out" '"code":"pin_locked"'
+
 # Per-device throttle: 20 failures across staff block the device.
 DX="dev-x-$RUN"
 out="$(wp_eval "
@@ -166,17 +214,54 @@ for (\$i = 0; \$i < 20; \$i++) { try { ${P}_Staff_Pins::verify($MGR, '0002', '$D
 try { ${P}_Staff_Pins::verify($MGR, '7309', '$DX'); echo 'allowed'; } catch (${P}_Core_Http_Error \$e) { echo \$e->error_code(), ',', \$e->status(); }")"
 expect_equal 'throttle: after 20 failures a device is blocked even with the right PIN (429)' "$out" 'pin_throttled,429'
 
+# Per-operator cap (#6986): the device id is chosen by the client, so a new
+# X-Bazaar-Device value on every wrong PIN must not escape the throttle.
+out="$(wp_eval "wp_set_current_user($OP3); global \$wpdb;
+for (\$i = 0; \$i < 20; \$i++) { try { ${P}_Staff_Pins::verify($MGR, '0003', 'dev-op-$RUN-' . \$i); } catch (${P}_Core_Http_Error \$e) { } if (\$i % 4 === 3) { \$wpdb->query(\$wpdb->prepare('UPDATE ' . ${P}_Core_Db::table('staff') . ' SET failed_attempts = 0, locked_until = NULL WHERE user_id = %d', $MGR)); } }
+try { ${P}_Staff_Pins::verify($MGR, '7309', 'dev-op-$RUN-fresh'); echo 'allowed'; } catch (${P}_Core_Http_Error \$e) { echo \$e->error_code(), ',', \$e->status(); }")"
+expect_equal 'throttle: one operator rotating device ids is blocked after 20 failures (429)' "$out" 'pin_throttled,429'
+out="$(wp_eval "wp_set_current_user($OP); try { ${P}_Staff_Pins::verify($MGR, '7309', 'dev-op-$RUN-other'); echo 'allowed'; } catch (${P}_Core_Http_Error \$e) { echo \$e->error_code(), ',', \$e->status(); }")"
+expect_equal 'throttle: the cap is per operator; another operator still gets through' "$out" 'allowed'
+
+# Throttle counter under a parallel burst (#6986): twelve processes claim one
+# slot in a bucket that allows five at the same instant. Exactly five pass;
+# the refused seven give their slots back.
+W="$(wp_eval "echo ${P}_Staff_Throttle::window(time());")"
+for i in $(seq 1 12); do
+  wp_eval "$(burst_wait thr "$i") echo ${P}_Staff_Throttle::claim(['test:burst:$RUN' => 5], $W) ? 'pass' : 'refused';" >"$PAR/thr-$i" &
+done
+burst_go thr 12
+wait
+expect_equal 'throttle burst: five of twelve parallel claims pass' "$(cat "$PAR"/thr-* | grep -c '^pass$')" '5'
+count_burst() { wp_eval "global \$wpdb; echo (string) \$wpdb->get_var(\$wpdb->prepare(\"SELECT option_value FROM \$wpdb->options WHERE option_name = %s\", ${P}_Staff_Throttle::option_name('test:burst:$RUN', $W)));"; }
+expect_equal 'throttle burst: refused claims gave their slots back (count is 5)' "$(count_burst)" '5'
+wp_eval "${P}_Staff_Throttle::release(['test:burst:$RUN' => 5], $W);" >/dev/null
+expect_equal 'throttle burst: release gives one slot back' "$(count_burst)" '4'
+out="$(wp_eval "global \$wpdb; echo \$wpdb->get_var(\$wpdb->prepare(\"SELECT autoload FROM \$wpdb->options WHERE option_name = %s\", ${P}_Staff_Throttle::option_name('test:burst:$RUN', $W)));")"
+case "$out" in no|off) expect 'throttle burst: the counter row is never autoloaded' 'ok' 'ok';; *) expect 'throttle burst: the counter row is never autoloaded' "$out" 'no or off';; esac
+
 # Own PIN
 PW="bzr-pass-$RUN"
 wp_eval "wp_set_password('$PW', $OP);" >/dev/null
-out="$(call PUT /bazaar/v1/pos/staff/me/pin '{"pin":"6150","current_password":"wrong"}' "$OP")"
+out="$(wp_eval "$PRE \$seen = []; add_action('wp_login_failed', function (\$login) use (&\$seen) { \$seen[] = \$login; }); echo wp_json_encode(bzcall('PUT','/bazaar/v1/pos/staff/me/pin','{\"pin\":\"6150\",\"current_password\":\"wrong\"}',$OP)), '|login_failed=', implode(',', \$seen);")"
 expect 'own pin: a wrong password is refused' "$out" '"code":"proof_invalid"'
+expect 'own pin: a wrong password fires wp_login_failed with the login' "$out" "|login_failed=bzrstaff_op_$RUN"
 out="$(call PUT /bazaar/v1/pos/staff/me/pin '{"pin":"6150"}' "$OP")"
 expect 'own pin: no proof is a 400' "$out" '"code":"invalid_request"'
 out="$(call PUT /bazaar/v1/pos/staff/me/pin "{\"pin\":\"6150\",\"current_password\":\"$PW\"}" "$OP")"
 expect 'own pin: the right password sets it' "$out" '"updated":true'
 out="$(call PUT /bazaar/v1/pos/staff/me/pin '{"pin":"8372","current_pin":"6150"}' "$OP" "['X-Bazaar-Device'=>'dev-b-$RUN']")"
 expect 'own pin: the current PIN also works as proof' "$out" '"updated":true'
+# Wrong passwords are counted per user (#6986): one so far, the right one gave
+# its slot back. Four more make five; the next try is refused unchecked.
+for n in 2 3 4 5; do
+  out="$(call PUT /bazaar/v1/pos/staff/me/pin "{\"pin\":\"6150\",\"current_password\":\"wrong-$n\"}" "$OP")"
+  expect "own pin: wrong password $n is 403 proof_invalid" "$out" '"code":"proof_invalid"'
+done
+out="$(call PUT /bazaar/v1/pos/staff/me/pin "{\"pin\":\"6150\",\"current_password\":\"$PW\"}" "$OP")"
+expect 'own pin: after five wrong passwords even the right one is refused (proof_locked)' "$out" '"code":"proof_locked"'
+expect 'own pin: the password lockout answers 403, never 401' "$out" '"status":403'
+expect 'own pin: the lockout says when to retry' "$out" '"retry_after":'
 
 # Approvals
 SUBJ="$(printf 'a%.0s' $(seq 1 64))"

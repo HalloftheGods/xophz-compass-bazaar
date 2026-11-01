@@ -31,17 +31,20 @@ check( 'locked in the future', $P::is_locked( '2026-11-01 12:00:01', $now ), tru
 check( 'not locked at the boundary', $P::is_locked( '2026-11-01 12:00:00', $now ), false );
 check( 'not locked when empty or null', [ $P::is_locked( '', $now ), $P::is_locked( null, $now ) ], [ false, false ] );
 
-// device throttle
-$s = false;
-for ( $i = 1; $i <= 20; $i++ ) {
-  check( "throttle: not blocked before failure $i", $P::throttle_blocked( $s, $now ), false );
-  $s = $P::throttle_next( $s, $now + $i );
-}
-check( 'throttle: blocked after 20 failures', $P::throttle_blocked( $s, $now + 21 ), true );
-check( 'throttle: window starts at the first failure', $s['t'], $now + 1 );
-check( 'throttle: open again after 15 minutes', $P::throttle_blocked( $s, $now + 1 + 900 ), false );
-check( 'throttle: a failure after the window restarts the count', $P::throttle_next( $s, $now + 1 + 900 ), [ 'n' => 1, 't' => $now + 901 ] );
-check( 'throttle: garbage state is a fresh window', $P::throttle_next( 'x', $now ), [ 'n' => 1, 't' => $now ] );
+// throttle buckets (#6986): the client-chosen device id is never the only key
+check( 'throttle: 20 per device, 20 per operator, 60 per address', [ $P::DEVICE_MAX, $P::OPERATOR_MAX, $P::IP_MAX ], [ 20, 20, 60 ] );
+check( 'throttle: device, operator and address buckets', $P::throttle_buckets( 'till-1', 7, '203.0.113.9' ), [
+  'pin:device:till-1'    => 20,
+  'pin:operator:7'       => 20,
+  'pin:ip:203.0.113.9'   => 60,
+] );
+check( 'throttle: a new device id still lands in the same operator and address buckets', array_slice( $P::throttle_buckets( 'random-' . mt_rand(), 7, '203.0.113.9' ), 1 ), [
+  'pin:operator:7'     => 20,
+  'pin:ip:203.0.113.9' => 60,
+] );
+check( 'throttle: a missing device is one shared device', array_keys( $P::throttle_buckets( '', 7, '' ) ), [ 'pin:device:none', 'pin:operator:7' ] );
+check( 'throttle: no operator and no address add no bucket', $P::throttle_buckets( 'd', 0, 'not-an-ip' ), [ 'pin:device:d' => 20 ] );
+check( 'throttle: IPv6 is keyed by its /64', array_keys( $P::throttle_buckets( 'd', 0, '2001:db8:1:2:aaaa::1' ) )[1], 'pin:ip:20010db800010002::/64' );
 
 // sessions
 $S   = 'Xophz_Compass_Bazaar_Staff_Sessions';
