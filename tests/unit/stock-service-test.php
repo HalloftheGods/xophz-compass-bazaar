@@ -62,6 +62,38 @@ check( 'replay: batch row attribution', [ $store->batches[2]['actor_user_id'], $
 check( 'conflict: same key with a different payload', $code( function () use ( $svc, $meta ) { $svc->adjust( 'adjust:1:a', 5, 0, -3, 'adjust', $meta ); } ), 'idempotency_key_reused' );
 check( 'conflict: nothing changed', [ $wc->stock[5], count( $store->batches ) ], [ 8.0, 2 ] );
 
+// A zero delta still refuses a key used for another request
+check( 'conflict: zero delta with a used key', $code( function () use ( $svc, $meta ) { $svc->adjust( 'adjust:1:a', 5, 0, 0, 'adjust', $meta ); } ), 'idempotency_key_reused' );
+check( 'zero delta with an unused key is a noop', $svc->adjust( 'adjust:1:zero', 5, 0, 0, 'adjust', $meta )->noop(), true );
+
+// Non-finite and out-of-range quantities are refused before anything is written
+$before = count( $store->batches );
+foreach ( [ 'adjust INF' => function () use ( $svc, $meta ) { $svc->adjust( 'adjust:1:inf', 5, 0, INF, 'adjust', $meta ); },
+            'adjust NAN' => function () use ( $svc, $meta ) { $svc->adjust( 'adjust:1:nan', 5, 0, NAN, 'adjust', $meta ); },
+            'count INF'  => function () use ( $svc, $meta ) { $svc->set_count( 'count:1:inf', 5, 0, INF, null, 'count', $meta ); },
+            'count NAN'  => function () use ( $svc, $meta ) { $svc->set_count( 'count:1:nan', 5, 0, NAN, null, 'count', $meta ); },
+            'expected INF' => function () use ( $svc, $meta ) { $svc->set_count( 'count:1:exp', 5, 0, 1, INF, 'count', $meta ); },
+            'transfer INF' => function () use ( $svc, $meta ) { $svc->transfer( 'transfer:1:inf', 5, 0, 1, INF, $meta ); } ] as $name => $fn ) {
+  check_throws( "range: $name refused", $fn, InvalidArgumentException::class );
+}
+check( 'range: nothing written, stock untouched', [ count( $store->batches ), $wc->stock[5] ], [ $before, 8.0 ] );
+
+// Joining a caller's transaction: after_commit waits for the caller's commit
+list( $js, $jw, $jsvc ) = $fresh();
+$jw->add_product( 5, 10 );
+$js->transaction( function () use ( $jsvc, $meta, $jw ) { $jsvc->adjust( 'adjust:1:join', 5, 0, -1, 'adjust', $meta ); } );
+check( 'join: after_commit recorded once after the caller commits', [ $jw->commits, $jw->queued, $jw->stock[5] ], [ [ [ [ 5 ], 'adjust' ] ], [], 9.0 ] );
+$batches = count( $js->batches );
+try {
+  $js->transaction( function () use ( $jsvc, $meta ) {
+    $jsvc->adjust( 'adjust:1:undo', 5, 0, -1, 'adjust', $meta );
+    throw new RuntimeException( 'caller fails' );
+  } );
+} catch ( RuntimeException $e ) {
+  // expected
+}
+check( 'join: caller rollback restores stock and batches, no after_commit', [ $jw->stock[5], count( $js->batches ), count( $jw->commits ), $jw->queued ], [ 9.0, $batches, 1, [] ] );
+
 // Concurrent winner: the key is invisible until the insert hits the unique index
 $store->hidden_keys['adjust:1:a'] = 2;
 $late = $svc->adjust( 'adjust:1:a', 5, 0, -2, 'adjust', $meta );

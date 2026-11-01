@@ -35,6 +35,9 @@ class Bazaar_Test_Stock_Memory_Wc_Port implements Xophz_Compass_Bazaar_Stock_Wc_
   /** @var array[] [pids, reason] per after_commit call */
   public $commits = [];
 
+  /** @var array[] after_commit calls made inside a transaction, recorded once it commits */
+  public $queued = [];
+
   /** @var callable|null fn(array $pids, Bazaar_Test_Stock_Memory_Wc_Port $port) */
   public $on_lock = null;
 
@@ -71,11 +74,11 @@ class Bazaar_Test_Stock_Memory_Wc_Port implements Xophz_Compass_Bazaar_Stock_Wc_
   }
 
   public function snapshot(): array {
-    return [ $this->stock, $this->multi, $this->deltas ];
+    return [ $this->stock, $this->multi, $this->deltas, $this->queued ];
   }
 
   public function restore( array $state ): void {
-    list( $this->stock, $this->multi, $this->deltas ) = $state;
+    list( $this->stock, $this->multi, $this->deltas, $this->queued ) = $state;
   }
 
   public function lock_products( array $pids ): array {
@@ -123,9 +126,16 @@ class Bazaar_Test_Stock_Memory_Wc_Port implements Xophz_Compass_Bazaar_Stock_Wc_
 
   public function after_commit( array $pids, string $reason ): void {
     if ( $this->store->in_transaction() ) {
-      throw new LogicException( 'after_commit inside a transaction.' );
+      $this->queued[] = [ $pids, $reason ];
+      return;
     }
     $this->commits[] = [ $pids, $reason ];
+  }
+
+  /** Called by the store after its outermost transaction commits; a rollback restores $queued, dropping the calls. */
+  public function committed(): void {
+    $this->commits = array_merge( $this->commits, $this->queued );
+    $this->queued  = [];
   }
 
   /** I2: for every initialized product, `_stock` equals location 0 plus every enabled location. @return string[] */

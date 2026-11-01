@@ -125,6 +125,11 @@ class Bazaar_Test_Stock_Memory_Store implements Xophz_Compass_Bazaar_Stock_Store
       $this->depth  = 0;
       $this->locked = [];
     }
+    foreach ( $this->participants as $p ) {
+      if ( method_exists( $p, 'committed' ) ) {
+        $p->committed();
+      }
+    }
     return $result;
   }
 

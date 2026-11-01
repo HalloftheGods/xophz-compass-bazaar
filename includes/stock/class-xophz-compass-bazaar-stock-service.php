@@ -64,10 +64,11 @@ final class Xophz_Compass_Bazaar_Stock_Service {
 
   /** A signed change at one location. A zero delta is a noop. */
   public function adjust( string $key, int $pid, int $loc, float $delta, string $reason, Xophz_Compass_Bazaar_Stock_Meta $meta ): Xophz_Compass_Bazaar_Stock_Result {
+    $batch = new Xophz_Compass_Bazaar_Stock_Batch( $key, $reason, [ new Xophz_Compass_Bazaar_Stock_Line( $pid, $loc, $delta ) ], $meta );
     if ( ! Xophz_Compass_Bazaar_Stock_Planner::differs( $delta, 0.0 ) ) {
-      return Xophz_Compass_Bazaar_Stock_Result::none();
+      return $this->replay( $key, $batch->request_hash() ) ?? Xophz_Compass_Bazaar_Stock_Result::none();
     }
-    return $this->apply( new Xophz_Compass_Bazaar_Stock_Batch( $key, $reason, [ new Xophz_Compass_Bazaar_Stock_Line( $pid, $loc, $delta ) ], $meta ) );
+    return $this->apply( $batch );
   }
 
   /**
@@ -77,8 +78,8 @@ final class Xophz_Compass_Bazaar_Stock_Service {
    * needs no change writes no batch, so a retry of it is computed again.
    */
   public function set_count( string $key, int $pid, int $loc, float $counted, ?float $expected, string $reason, Xophz_Compass_Bazaar_Stock_Meta $meta ): Xophz_Compass_Bazaar_Stock_Result {
-    if ( $counted < 0 ) {
-      throw new InvalidArgumentException( 'A counted quantity cannot be negative.' );
+    if ( $counted < 0 || ! Xophz_Compass_Bazaar_Stock_Line::in_range( $counted ) || ( null !== $expected && ! Xophz_Compass_Bazaar_Stock_Line::in_range( $expected ) ) ) {
+      throw new InvalidArgumentException( 'A counted or expected quantity must be finite, within range, and the count not negative.' );
     }
     $basis   = [ 'stock_product_id' => $pid, 'location_id' => $loc, 'counted' => Xophz_Compass_Bazaar_Stock_Keys::number( $counted ) ];
     $options = [ 'hash_basis' => $basis + [ 'expected' => null === $expected ? null : Xophz_Compass_Bazaar_Stock_Keys::number( $expected ) ] ];
@@ -113,7 +114,7 @@ final class Xophz_Compass_Bazaar_Stock_Service {
 
   /** Move $qty from one location to another: one batch, reason transfer_out, two lines. */
   public function transfer( string $key, int $pid, int $from, int $to, float $qty, Xophz_Compass_Bazaar_Stock_Meta $meta ): Xophz_Compass_Bazaar_Stock_Result {
-    if ( $from === $to || ! ( $qty > 0 ) ) {
+    if ( $from === $to || ! ( $qty > 0 ) || ! Xophz_Compass_Bazaar_Stock_Line::in_range( $qty ) ) {
       throw new InvalidArgumentException( 'A transfer needs two different locations and a positive quantity.' );
     }
     $lines = [ new Xophz_Compass_Bazaar_Stock_Line( $pid, $from, -$qty ), new Xophz_Compass_Bazaar_Stock_Line( $pid, $to, $qty ) ];

@@ -61,10 +61,21 @@ final class Xophz_Compass_Bazaar_Stock_Line {
     if ( null !== $extra['cost_source'] && strlen( (string) $extra['cost_source'] ) > 16 ) {
       throw new InvalidArgumentException( 'Stock line cost_source must be 16 characters or fewer.' );
     }
+    if ( ! is_finite( $qty_delta ) || abs( $qty_delta ) > self::MAX_QTY ) {
+      throw new InvalidArgumentException( 'A stock line quantity must be a finite number within +/- 999999999999999.9999.' );
+    }
     $this->stock_product_id = $stock_product_id;
     $this->location_id      = $location_id;
     $this->qty_delta        = self::qty( $qty_delta );
     $this->extra            = $extra;
+  }
+
+  /** Largest magnitude a decimal(19,4) column holds. */
+  const MAX_QTY = 999999999999999.9999;
+
+  /** Whether a quantity is finite and within the decimal(19,4) range. */
+  public static function in_range( float $value ): bool {
+    return is_finite( $value ) && abs( $value ) <= self::MAX_QTY;
   }
 
   /** Round to the ledger's 4 decimals; never returns -0.0. */

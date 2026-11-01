@@ -107,6 +107,10 @@ check_throws( 'keys: absurd wc value cannot overflow the column', function () us
 // Value objects
 $B = 'Xophz_Compass_Bazaar_Stock_Batch';
 check( 'line: 4-decimal rounding and no -0', [ $ln( 1, 0, 1.23456 )->qty_delta(), Xophz_Compass_Bazaar_Stock_Line::qty( -0.00001 ) ], [ 1.2346, 0.0 ] );
+check_throws( 'line: NAN refused', function () use ( $ln ) { $ln( 1, 0, NAN ); }, InvalidArgumentException::class );
+check_throws( 'line: INF refused', function () use ( $ln ) { $ln( 1, 0, INF ); }, InvalidArgumentException::class );
+check_throws( 'line: beyond decimal(19,4) refused', function () use ( $ln ) { $ln( 1, 0, -1e20 ); }, InvalidArgumentException::class );
+check( 'line: the largest column value is accepted', $ln( 1, 0, 999999999999999.0 )->qty_delta(), 999999999999999.0 );
 check_throws( 'line: unknown field refused', function () use ( $ln ) { $ln( 1, 0, 1, [ 'qty' => 2 ] ); }, InvalidArgumentException::class );
 check_throws( 'line: stock product id required', function () use ( $ln ) { $ln( 0, 0, 1 ); }, InvalidArgumentException::class );
 check_throws( 'line: lower-case currency refused', function () use ( $ln ) { $ln( 1, 0, 1, [ 'cost_currency' => 'usd' ] ); }, InvalidArgumentException::class );
