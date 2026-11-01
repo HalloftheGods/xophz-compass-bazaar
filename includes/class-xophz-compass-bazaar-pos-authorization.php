@@ -94,7 +94,21 @@ class Xophz_Compass_Bazaar_Pos_Authorization {
     return self::check( $record, $user_id, $gateway, $amount, $now ?? time() );
   }
 
-  /** Pure comparison used by consume(). */
+  /**
+   * Check a token without spending it. Same answers as consume(), but the
+   * token stays valid. Not a reservation: two callers can both peek the same
+   * token, so the one that spends it (consume) is the real gate.
+   *
+   * @return string '' when it would pass, otherwise why it would be refused.
+   */
+  public static function peek( string $token, int $user_id, string $gateway, $amount, ?int $now = null ): string {
+    if ( '' === $token ) {
+      return 'missing';
+    }
+    return self::check( get_transient( self::key( $token ) ), $user_id, $gateway, $amount, $now ?? time() );
+  }
+
+  /** Pure comparison used by consume() and peek(). */
   public static function check( $record, int $user_id, string $gateway, $amount, int $now ): string {
     if ( ! is_array( $record ) ) {
       return 'unknown or already used';
