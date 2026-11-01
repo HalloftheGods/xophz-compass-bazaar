@@ -6,37 +6,13 @@
  * Exits 1 on any failure.
  */
 
-// Minimal WordPress i18n stubs for the status filters.
-function _x( $text ) { return $text; }
-function _n_noop( $single, $plural ) { return [ 0 => $single, 1 => $plural, 'singular' => $single, 'plural' => $plural ]; }
-
-// In-memory transients and option stubs for the POS authorization tests.
-$GLOBALS['test_transients'] = [];
-$GLOBALS['test_environment'] = 'production';
-$GLOBALS['test_filters'] = [];
-function set_transient( $key, $value, $ttl ) { $GLOBALS['test_transients'][ $key ] = $value; return true; }
-function get_transient( $key ) { return $GLOBALS['test_transients'][ $key ] ?? false; }
-function delete_transient( $key ) { unset( $GLOBALS['test_transients'][ $key ] ); return true; }
-function wp_generate_password( $length ) { return bin2hex( random_bytes( (int) ( $length / 2 ) ) ); }
-function wp_get_environment_type() { return $GLOBALS['test_environment']; }
-function apply_filters( $hook, $value ) { return array_key_exists( $hook, $GLOBALS['test_filters'] ) ? $GLOBALS['test_filters'][ $hook ] : $value; }
+// WordPress stubs, check() and the pass/fail counters live in the shared harness.
+require_once __DIR__ . '/support/harness.php';
 
 $root = dirname( __DIR__ );
 require_once $root . '/includes/class-xophz-compass-bazaar-sale-pricing.php';
 require_once $root . '/admin/class-xophz-compass-bazaar-admin-fulfillment.php';
 require_once $root . '/includes/class-xophz-compass-bazaar-pos-authorization.php';
-
-$failures = 0;
-$passes   = 0;
-function check( string $name, $actual, $expected ) {
-  global $failures, $passes;
-  if ( $actual === $expected ) {
-    $passes++;
-    return;
-  }
-  $failures++;
-  fwrite( STDERR, "FAIL $name\n  expected: " . var_export( $expected, true ) . "\n  actual:   " . var_export( $actual, true ) . "\n" );
-}
 
 $P = 'Xophz_Compass_Bazaar_Sale_Pricing';
 
@@ -120,5 +96,18 @@ check( 'test portal: on in local', $A::is_test_portal_enabled(), true );
 $GLOBALS['test_filters']['xophz_compass_bazaar_pos_test_portal'] = false;
 check( 'test portal: filter can turn it off', $A::is_test_portal_enabled(), false );
 
-echo "$passes passed, $failures failed\n";
-exit( $failures > 0 ? 1 : 0 );
+// Other support files, then every unit file (each also runs on its own).
+$support = glob( __DIR__ . '/support/*.php' ) ?: [];
+sort( $support );
+foreach ( $support as $file ) {
+  if ( 'harness.php' !== basename( $file ) ) {
+    require_once $file;
+  }
+}
+$units = glob( __DIR__ . '/unit/*-test.php' ) ?: [];
+sort( $units );
+foreach ( $units as $file ) {
+  require $file;
+}
+
+exit( bazaar_test_summary() );
