@@ -11,6 +11,12 @@
  * its writes unless the caller lets the exception reach the outermost tx().
  * Retries re-run the whole callable, so it must be safe to run again.
  *
+ * After-commit and after-rollback callbacks are best effort: each runs in its
+ * own try/catch, a Throwable is logged and the next callback still runs, so a
+ * committed transaction never surfaces as an exception from tx() (and a
+ * rollback keeps its original exception). callback_errors() lists what the
+ * last outermost tx() caught.
+ *
  * @package Xophz_Compass_Bazaar
  */
 class Xophz_Compass_Bazaar_Core_Db {
@@ -23,6 +29,9 @@ class Xophz_Compass_Bazaar_Core_Db {
 
   /** @var callable[] */
   private static $rollback_callbacks = [];
+
+  /** @var string[] Messages of the callbacks that threw in the last outermost tx(). */
+  private static $callback_errors = [];
 
   /**
    * Run $fn in a transaction and return its result. The outermost call retries
@@ -45,6 +54,7 @@ class Xophz_Compass_Bazaar_Core_Db {
     while ( true ) {
       self::raw( 'START TRANSACTION' );
       self::$depth              = 1;
+      self::$callback_errors    = [];
       self::$commit_callbacks   = [];
       self::$rollback_callbacks = [];
       try {
@@ -61,7 +71,7 @@ class Xophz_Compass_Bazaar_Core_Db {
         $rollbacks                = self::$rollback_callbacks;
         self::$commit_callbacks   = [];
         self::$rollback_callbacks = [];
-        self::run_all( $rollbacks );
+        self::run_all( $rollbacks, 'after-rollback' );
         if ( $e instanceof Xophz_Compass_Bazaar_Core_Deadlock_Exception && $attempt < $retries ) {
           $attempt++;
           usleep( random_int( 20000, 80000 ) );
@@ -73,13 +83,18 @@ class Xophz_Compass_Bazaar_Core_Db {
       $commits                  = self::$commit_callbacks;
       self::$commit_callbacks   = [];
       self::$rollback_callbacks = [];
-      self::run_all( $commits );
+      self::run_all( $commits, 'after-commit' );
       return $result;
     }
   }
 
   public static function in_tx(): bool {
     return self::$depth > 0;
+  }
+
+  /** @return string[] "<phase>: <class>: <message>" for each callback that threw in the last outermost tx(). */
+  public static function callback_errors(): array {
+    return self::$callback_errors;
   }
 
   /** Run $fn after the outermost COMMIT; dropped on rollback; runs at once outside a transaction. */
@@ -220,10 +235,20 @@ class Xophz_Compass_Bazaar_Core_Db {
     throw new RuntimeException( 'Bazaar database error: ' . $message );
   }
 
-  /** @param callable[] $callbacks */
-  private static function run_all( array $callbacks ): void {
+  /**
+   * Run every callback; one that throws is logged and recorded, never rethrown.
+   *
+   * @param callable[] $callbacks
+   */
+  private static function run_all( array $callbacks, string $phase ): void {
     foreach ( $callbacks as $callback ) {
-      $callback();
+      try {
+        $callback();
+      } catch ( Throwable $e ) {
+        $message                 = $phase . ': ' . get_class( $e ) . ': ' . $e->getMessage();
+        self::$callback_errors[] = $message;
+        error_log( 'Bazaar ' . $message );
+      }
     }
   }
 }
