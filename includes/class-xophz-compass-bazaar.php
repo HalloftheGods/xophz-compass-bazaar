@@ -89,6 +89,7 @@ class Xophz_Compass_Bazaar extends Xophz_Compass_Plugin_Base {
     $this->define_admin_hooks();
     $this->define_public_hooks();
     $this->define_compass_hooks();
+    Xophz_Compass_Bazaar_Core_Modules::boot( $this );
   }
 
   /**
@@ -108,6 +109,14 @@ class Xophz_Compass_Bazaar extends Xophz_Compass_Plugin_Base {
   * @access   private
   */
   private function load_dependencies() {
+    /**
+    * Convention autoloader for Xophz_Compass_Bazaar_<Group>_<Name> classes
+    * (includes/core, schema, events, and the later groups). The require_once
+    * lines below stay; a class with no matching file is simply not loaded.
+    */
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/core/class-xophz-compass-bazaar-core-autoloader.php';
+    Xophz_Compass_Bazaar_Core_Autoloader::register( plugin_dir_path( dirname( __FILE__ ) ) );
+
     /**
     * The class responsible for orchestrating the actions and filters of the
     * core plugin.
@@ -256,7 +265,19 @@ class Xophz_Compass_Bazaar extends Xophz_Compass_Plugin_Base {
   * @since    1.0.0
   */
   public function run(): void {
+		if ( class_exists( 'Xophz_Compass_Bazaar_Security_Guard' ) ) {
+			$this->registered_actions = Xophz_Compass_Bazaar_Security_Guard::wrap_ajax_actions( $this->registered_actions );
+		}
+		add_action( 'init', [ 'Xophz_Compass_Bazaar_Schema_Installer', 'maybe_install' ], 1 );
 		$this->run_hooks();
+	}
+
+  /**
+  * Register the REST controllers listed in the module manifest.
+  * Hooked to rest_api_init by Xophz_Compass_Bazaar_Core_Modules::boot().
+  */
+  public function register_rest_routes(): void {
+		Xophz_Compass_Bazaar_Core_Modules::register_rest();
 	}
 
   /**

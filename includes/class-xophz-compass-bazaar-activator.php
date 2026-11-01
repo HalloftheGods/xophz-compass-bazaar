@@ -30,7 +30,10 @@ class Xophz_Compass_Bazaar_Activator {
 	 * @since    1.0.0
 	 */
 	public static function activate() {
-
+		// Activation runs before the plugin class is constructed, so register the autoloader here.
+		require_once plugin_dir_path( __FILE__ ) . 'core/class-xophz-compass-bazaar-core-autoloader.php';
+		Xophz_Compass_Bazaar_Core_Autoloader::register( dirname( __DIR__ ) );
+		Xophz_Compass_Bazaar_Schema_Installer::install();
 	}
 
 }
