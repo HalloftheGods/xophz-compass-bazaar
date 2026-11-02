@@ -4,17 +4,21 @@
 # array arguments are passed as stringified JSON, the way a form post sends
 # them (that is what failed before the fix).
 #
-# Asserts: split and coupon sales succeed; a percent custom discount takes
+# Asserts: split and coupon sales succeed (the card leg carries its terminal
+# slip reference, which checkout v2 requires); a percent custom discount takes
 # that percent of the item subtotal; a cashierId that is not the logged-in
 # user is ignored and noted; an unknown, refunded or checkout-draft status is
 # refused; the customer search leaves staff out and masks contact details
 # unless the caller holds bazaar_view_customers or typed the full email; a
-# refund with stringified items refunds the right amount; a receipt never
-# overwrites a different billing email; pos-authorization.sh still passes.
+# refund with stringified items refunds the right amount; a cashier's refund
+# needs a manager approval (refused approval_required with status 403 without
+# one, done with one); a receipt never overwrites a different billing email;
+# pos-authorization.sh still passes.
 #
-# Side effects: creates a throwaway product, coupon, three users and a few
-# orders, and deletes them at the end (also when a check fails). It installs
-# the Bazaar roles when they are missing (Security_Capabilities::install_roles).
+# Side effects: creates a throwaway product, coupon, three users, a few
+# orders and one approval row, and deletes them at the end (also when a check
+# fails). It installs the Bazaar roles when they are missing
+# (Security_Capabilities::install_roles).
 #
 # Run from the repo root: bash wp-content/plugins/xophz-compass-bazaar/tests/integration/orders-split.sh
 set -u
@@ -58,6 +62,7 @@ ORDERS=''
 
 cleanup() {
   wp_eval "
+if ('$USERS') { global \$wpdb; foreach (array_filter(explode(',', '$USERS')) as \$id) { \$wpdb->query(\$wpdb->prepare('DELETE FROM ' . Xophz_Compass_Bazaar_Core_Db::table('approvals') . ' WHERE requested_by = %d', (int) \$id)); } }
 foreach (array_filter(explode(',', '$ORDERS')) as \$id) { \$o = wc_get_order((int) \$id); if (\$o) { \$o->delete(true); } }
 if ('$PRODUCT_ID') { \$p = wc_get_product((int) '$PRODUCT_ID'); if (\$p) { \$p->delete(true); } }
 if ('$COUPON_ID') { wp_delete_post((int) '$COUPON_ID', true); }
@@ -105,7 +110,7 @@ ADMIN_ID="$(wp_eval 'echo get_users(["role" => "administrator", "number" => 1, "
 ITEMS="[{\"product_id\":$PRODUCT_ID,\"quantity\":2}]"
 
 # Sales with stringified arrays
-out="$(call Admin_Orders createPosOrder "{\"items\":$ITEMS,\"paymentMethod\":\"bazaar_split\",\"splitPayments\":[{\"method\":\"cash\",\"amount\":12},{\"method\":\"card\",\"amount\":8}]}")"
+out="$(call Admin_Orders createPosOrder "{\"items\":$ITEMS,\"paymentMethod\":\"bazaar_split\",\"splitPayments\":[{\"method\":\"cash\",\"amount\":12},{\"method\":\"card\",\"amount\":8,\"reference\":\"SLIP-55501\"}]}")"
 expect 'split sale: succeeds with stringified splitPayments' "$out" '"success":true'
 id="$(json_field "$out" order_id)"; ORDERS="$ORDERS,$id"
 expect_equal 'split sale: both tenders are stored' "$(order_field "$id" 'count(json_decode($o->get_meta("_pos_split_payments"), true))')" '2'
@@ -160,8 +165,16 @@ item_id="$(order_field "$id" 'array_key_first($o->get_items())')"
 out="$(call Admin_Pos_Refunds processPosRefund "{\"order_id\":\"$id\",\"items\":[{\"item_id\":$item_id,\"qty\":1}],\"reason\":\"orders-split check\"}")"
 expect 'refund: stringified items refund something' "$out" '"message":"Refund processed successfully."'
 expect_equal 'refund: one of two units (10.00) is refunded' "$(order_field "$id" '$o->get_total_refunded()')" '10'
+# Refunds always need a manager approval for a cashier (user sign-off 2026-11-01).
 out="$(call Admin_Pos_Refunds processPosRefund "{\"order_id\":\"$id\",\"items\":[{\"item_id\":$item_id,\"qty\":1}]}" "$CASHIER_ID")"
-expect 'refund: a cashier holds bazaar_refund and may refund' "$out" '"success":true'
+expect 'refund: a cashier without an approval is refused approval_required' "$out" '"code":"approval_required"'
+expect 'refund: the refusal carries status 403' "$out" '"status":403'
+subject="$(json_field "$out" subject_hash)"
+amount="$(json_field "$out" amount_minor)"
+token="$(wp_eval "\$t = bin2hex(random_bytes(16)); Xophz_Compass_Bazaar_Core_Db::insert(Xophz_Compass_Bazaar_Core_Db::table('approvals'), ['token_hash' => Xophz_Compass_Bazaar_Staff_Approvals::hash_token(\$t), 'scope' => 'refund', 'subject_hash' => '$subject', 'amount_minor' => (int) '$amount', 'basis_points' => 0, 'requested_by' => (int) '$CASHIER_ID', 'approved_by' => (int) '$ADMIN_ID', 'device_id' => '', 'reason' => 'orders-split.sh', 'created_at' => gmdate('Y-m-d H:i:s'), 'expires_at' => gmdate('Y-m-d H:i:s', time() + 300), 'consumed_ref' => '']); echo \$t;" | tail -1)"
+out="$(call Admin_Pos_Refunds processPosRefund "{\"order_id\":\"$id\",\"items\":[{\"item_id\":$item_id,\"qty\":1}],\"approval_token\":\"$token\"}" "$CASHIER_ID")"
+expect 'refund: a cashier with a valid manager approval may refund' "$out" '"success":true'
+expect_equal 'refund: both units (20.00) are now refunded' "$(order_field "$id" '$o->get_total_refunded()')" '20'
 out="$(call Admin_Pos_Refunds processPosRefund "{\"order_id\":\"$id\",\"items\":[{\"item_id\":$item_id,\"qty\":1}]}" "$CUSTOMER_ID")"
 expect 'refund: a customer account is refused' "$out" 'Permission denied.'
 

@@ -3,11 +3,27 @@
  * Runs the legacy create_pos_order request through checkout v2.
  *
  * Spec: docs/plugins/bazaar-core-v2.md section 11.5. Admin_Pos_Sale routes here
- * while the option bazaar_checkout_pipeline is "v2" (the default).
+ * while the option bazaar_checkout_pipeline is "v2" (the default) and
+ * checkout v2 is on (Checkout_Service::enabled()).
  *
  * Guaranteed:
  * - The answer is {success:true, order_id, order_key} or {success:false,
  *   message}, and the caller sends it with HTTP 200 as before.
+ * - With checkout v2 turned off (bazaar_pos_checkout_v2=no, spec 17), the
+ *   request runs Checkout_Legacy_Writer, the rollback body, instead.
+ * - A sale whose checkout row committed is paid, so it is never answered as a
+ *   failure: when a later step throws (finalize_pending, or anything else with
+ *   the row committed or completed), the answer is {success:true, order_id,
+ *   order_key, finalize_pending, message}. finalize_pending is true while the
+ *   row is still committed; the sweeper finishes it. The register must not
+ *   ring it again (the next call has a new key and would be a second sale).
+ * - A cashierId that is not the acting user is ignored and recorded in an
+ *   order note, as the old handler did.
+ * - A split leg's reference, cardBrand, cardLast4 and authorizationToken come
+ *   from splitPayments[i], else from the matching legs[] entry (the same
+ *   index with the same method, else the first unused entry with that
+ *   method). A cash leg's tendered_minor comes from legs[] when it is at least
+ *   the leg amount.
  * - An empty cart is refused with "Cart is empty." before any checkout row is
  *   claimed. So is a cart whose every line is skipped (quantity 0, an
  *   unusable product id, a custom line without a title or price).
@@ -19,7 +35,7 @@
  * - A refused digital tender keeps the old text, with the old method name
  *   (the cleaned gateway title, else the id with a capital letter).
  * - The cashier is the logged-in user (or the staff session); the client's
- *   cashierId is not read.
+ *   cashierId never changes who is recorded.
  *
  * Not guaranteed:
  * - The cart is priced twice, once here for the single-tender amount and once
@@ -36,20 +52,23 @@ class Xophz_Compass_Bazaar_Checkout_Legacy_Adapter {
 
   const MSG_EMPTY = 'Cart is empty.';
   const MSG_SPLIT = 'Split payment sum does not match order total.';
+  const MSG_FINALIZE_PENDING = 'The sale is recorded and paid. Finishing the order is pending and completes on its own; do not ring it again.';
 
   /**
    * @param object $args The decoded request (Core_Request::legacy_args()).
    * @return array The JSON payload to send.
    */
   public static function handle( object $args ): array {
+    if ( ! Xophz_Compass_Bazaar_Checkout_Service::enabled() ) {
+      return Xophz_Compass_Bazaar_Checkout_Legacy_Writer::run( $args );
+    }
     $tenders = [];
+    $key     = self::key();
+    $context = null;
     try {
       $cart = self::cart( $args );
       if ( empty( $cart['lines'] ) ) {
         return self::failure( self::MSG_EMPTY );
-      }
-      if ( ! Xophz_Compass_Bazaar_Checkout_Service::enabled() ) {
-        return self::failure( 'Checkout v2 is turned off on this site.' );
       }
       $context = Xophz_Compass_Bazaar_Security_Guard::context();
       $priced  = ( new Xophz_Compass_Bazaar_Pricing_Pricer() )->price( Xophz_Compass_Bazaar_Pricing_Cart_Request::from_array( $cart ), $context );
@@ -59,18 +78,89 @@ class Xophz_Compass_Bazaar_Checkout_Legacy_Adapter {
       }
       $tenders = $mapped;
       $request = Xophz_Compass_Bazaar_Checkout_Request::from_array( [
-        'client_key' => self::key(),
+        'client_key' => $key,
         'cart'       => $cart,
         'tenders'    => $tenders,
       ] );
       $request->legacy_trusted = true;
       $result = ( new Xophz_Compass_Bazaar_Checkout_Service() )->submit( $request, $context );
-      return self::answer( (array) ( $result['body'] ?? [] ) );
+      return self::noted( self::answer( (array) ( $result['body'] ?? [] ) ), $args, $context );
     } catch ( Xophz_Compass_Bazaar_Core_Http_Error $e ) {
-      return self::failure( self::message( $e, $tenders ) );
+      return self::noted( self::committed( $key, $context ), $args, $context ) ?? self::failure( self::message( $e, $tenders ) );
     } catch ( \Throwable $e ) {
-      return self::failure( $e->getMessage() );
+      return self::noted( self::committed( $key, $context ), $args, $context ) ?? self::failure( $e->getMessage() );
     }
+  }
+
+  /**
+   * The success answer for a checkout row that committed (it is paid), or
+   * null for any other row. Pure.
+   *
+   * @param array|null $row A checkout row (state, order_id).
+   */
+  public static function committed_answer( ?array $row, string $order_key = '' ): ?array {
+    $state    = (string) ( $row['state'] ?? '' );
+    $order_id = (int) ( $row['order_id'] ?? 0 );
+    if ( $order_id <= 0 || ! in_array( $state, [ 'committed', 'completed' ], true ) ) {
+      return null;
+    }
+    $answer = [ 'success' => true, 'order_id' => $order_id, 'order_key' => $order_key ];
+    if ( 'committed' === $state ) {
+      $answer['finalize_pending'] = true;
+      $answer['message']          = self::MSG_FINALIZE_PENDING;
+    }
+    return $answer;
+  }
+
+  /**
+   * The order note for a cashierId the register sent that is not the acting
+   * user, or '' when there is none to record. Pure.
+   */
+  public static function ignored_cashier_note( object $args, int $acting_user_id ): string {
+    $sent = is_numeric( $args->cashierId ?? null ) ? (int) $args->cashierId : 0;
+    if ( $sent <= 0 || $sent === $acting_user_id ) {
+      return '';
+    }
+    return sprintf( 'The register sent cashier id %d. It was ignored; the sale is recorded for user %d.', $sent, $acting_user_id );
+  }
+
+  /** committed_answer() for this request's key, with the order key filled in. */
+  private static function committed( string $key, ?Xophz_Compass_Bazaar_Security_Context $context ): ?array {
+    if ( null === $context ) {
+      return null;
+    }
+    try {
+      $row    = Xophz_Compass_Bazaar_Checkout_Repository::find_by_key( $context->operator_user_id, $key );
+      $answer = self::committed_answer( $row );
+      if ( null !== $answer ) {
+        $order               = wc_get_order( $answer['order_id'] );
+        $answer['order_key'] = $order ? (string) $order->get_order_key() : '';
+        error_log( 'Bazaar legacy checkout ' . (int) $row['id'] . ' answered success in state ' . (string) $row['state'] . ' after a later step failed.' );
+      }
+      return $answer;
+    } catch ( \Throwable $e ) {
+      error_log( 'Bazaar legacy checkout lookup failed for ' . $key . ': ' . $e->getMessage() );
+      return null;
+    }
+  }
+
+  /** Add the ignored-cashier note to a successful sale's order. Never changes the answer. */
+  private static function noted( ?array $answer, object $args, ?Xophz_Compass_Bazaar_Security_Context $context ): ?array {
+    if ( null === $answer || empty( $answer['success'] ) || null === $context ) {
+      return $answer;
+    }
+    $note = self::ignored_cashier_note( $args, $context->acting_user_id );
+    if ( '' !== $note ) {
+      try {
+        $order = wc_get_order( (int) $answer['order_id'] );
+        if ( $order ) {
+          $order->add_order_note( $note );
+        }
+      } catch ( \Throwable $e ) {
+        error_log( 'Bazaar legacy checkout note failed: ' . $e->getMessage() );
+      }
+    }
+    return $answer;
   }
 
   /** The Checkout_Request cart for the legacy fields. Pure. */
@@ -140,23 +230,68 @@ class Xophz_Compass_Bazaar_Checkout_Legacy_Adapter {
       ] ) ];
     }
 
-    $legs = [];
-    $sum  = 0;
-    foreach ( $R::array_param( $args, 'splitPayments' ) as $leg ) {
+    $legs   = [];
+    $sum    = 0;
+    $detail = array_values( array_filter( $R::array_param( $args, 'legs' ), 'is_array' ) );
+    $used   = [];
+    foreach ( array_values( $R::array_param( $args, 'splitPayments' ) ) as $index => $leg ) {
       $leg    = is_array( $leg ) ? $leg : [];
       $amount = self::minor( self::number( $leg['amount'] ?? 0 ) );
       if ( 0 === $amount ) {
         continue;
       }
+      $method = self::method( $leg['method'] ?? '' );
+      $extra  = self::leg_detail( $detail, $index, $method, $used );
       $sum   += $amount;
-      $legs[] = self::tender( self::method( $leg['method'] ?? '' ), $amount, [
-        'reference'     => $leg['reference'] ?? '',
-        'cardBrand'     => $leg['cardBrand'] ?? '',
-        'cardLast4'     => $leg['cardLast4'] ?? '',
-        'authorization' => self::text( $leg['authorizationToken'] ?? '' ) ?: $token,
+      $legs[] = self::tender( $method, $amount, [
+        'reference'     => self::first( $leg, $extra, 'reference' ),
+        'cardBrand'     => self::first( $leg, $extra, 'cardBrand', 'card_brand' ),
+        'cardLast4'     => self::first( $leg, $extra, 'cardLast4', 'card_last4' ),
+        'authorization' => self::text( self::first( $leg, $extra, 'authorizationToken' ) ) ?: $token,
+        'tendered'      => $extra['tendered_minor'] ?? null,
       ] );
     }
     return $sum === $total_minor ? $legs : null;
+  }
+
+  /**
+   * The legs[] entry that details splitPayments[$index]: the same index when
+   * its method matches, else the first unused entry with that method. [] when
+   * none does. Marks the entry used.
+   *
+   * @param array[] $detail
+   * @param bool[]  $used
+   */
+  private static function leg_detail( array $detail, int $index, string $method, array &$used ): array {
+    $matches = function ( $i ) use ( $detail, $method, $used ) {
+      return isset( $detail[ $i ] ) && empty( $used[ $i ] ) && self::method( $detail[ $i ]['method'] ?? '' ) === $method;
+    };
+    $pick = $matches( $index ) ? $index : null;
+    if ( null === $pick ) {
+      foreach ( array_keys( $detail ) as $i ) {
+        if ( $matches( $i ) ) {
+          $pick = $i;
+          break;
+        }
+      }
+    }
+    if ( null === $pick ) {
+      return [];
+    }
+    $used[ $pick ] = true;
+    return $detail[ $pick ];
+  }
+
+  /** The first non-empty scalar among $leg[$keys…], then $extra[$keys…]; '' when none. */
+  private static function first( array $leg, array $extra, string ...$keys ) {
+    foreach ( [ $leg, $extra ] as $source ) {
+      foreach ( $keys as $key ) {
+        if ( isset( $source[ $key ] ) && is_scalar( $source[ $key ] ) && '' !== trim( (string) $source[ $key ] ) ) {
+          return $source[ $key ];
+        }
+      }
+    }
+    return '';
   }
 
   /** legacy:<uuid4>, new on every call. */
@@ -206,14 +341,16 @@ class Xophz_Compass_Bazaar_Checkout_Legacy_Adapter {
     return $minor > 0 ? [ 'name' => $name, 'type' => 'fixed', 'amount_minor' => $minor ] : null;
   }
 
-  /** @param array{reference:mixed,cardBrand:mixed,cardLast4:mixed,authorization:string} $extra */
+  /** @param array{reference:mixed,cardBrand:mixed,cardLast4:mixed,authorization:string,tendered?:mixed} $extra */
   private static function tender( string $method, int $amount_minor, array $extra ): array {
-    $brand = strtolower( self::text( $extra['cardBrand'] ) );
-    $last4 = self::text( $extra['cardLast4'] );
+    $brand    = strtolower( self::text( $extra['cardBrand'] ) );
+    $last4    = self::text( $extra['cardLast4'] );
+    $tendered = $extra['tendered'] ?? null;
+    $tendered = is_numeric( $tendered ) && (int) $tendered == $tendered && (int) $tendered >= $amount_minor ? (int) $tendered : $amount_minor;
     return [
       'method_id'           => $method,
       'amount_minor'        => $amount_minor,
-      'tendered_minor'      => 'cash' === $method ? $amount_minor : null,
+      'tendered_minor'      => 'cash' === $method ? $tendered : null,
       'reference'           => self::text( $extra['reference'] ),
       'card_brand'          => '' === $brand ? '' : ( in_array( $brand, Xophz_Compass_Bazaar_Payments_Tender::CARD_BRANDS, true ) ? $brand : 'other' ),
       'card_last4'          => 1 === preg_match( '/^[0-9]{4}$/', $last4 ) ? $last4 : '',

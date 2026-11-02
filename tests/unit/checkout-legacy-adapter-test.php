@@ -109,4 +109,40 @@ foreach ( $A::tenders( $args( [ 'paymentMethod' => 'bazaar_split', 'splitPayment
 }
 check( 'split: mapped legs pass the tender shape check', $ok, true );
 
+// Split: the SPA sends the slip reference only in legs[] (finding 13).
+$spa = [
+  'paymentMethod' => 'bazaar_split',
+  'splitPayments' => '[{"method":"cash","amount":10},{"method":"bazaar_card_terminal","amount":15.5}]',
+  'legs'          => '[{"method":"cash","amount":10,"amount_minor":1000,"kind":"cash","tendered_minor":2000},{"method":"bazaar_card_terminal","amount":15.5,"amount_minor":1550,"kind":"external_terminal","reference":"SLIP-7001","cardLast4":"4242","cardBrand":"Visa"}]',
+];
+$t = $A::tenders( $args( $spa ), 2550 );
+check( 'legs: the card reference, brand and last four come from legs[]', [ $t[1]['reference'], $t[1]['card_brand'], $t[1]['card_last4'] ], [ 'SLIP-7001', 'visa', '4242' ] );
+check( 'legs: a cash leg keeps the tendered amount from legs[]', [ $t[0]['tendered_minor'], $t[0]['amount_minor'] ], [ 2000, 1000 ] );
+$both = $spa;
+$both['splitPayments'] = [ [ 'method' => 'cash', 'amount' => 10 ], [ 'method' => 'bazaar_card_terminal', 'amount' => 15.5, 'reference' => 'SLIP-OWN1' ] ];
+check( 'legs: a reference in splitPayments wins', $A::tenders( $args( $both ), 2550 )[1]['reference'], 'SLIP-OWN1' );
+$reordered = [
+  'paymentMethod' => 'bazaar_split',
+  'splitPayments' => [ [ 'method' => 'bazaar_card_terminal', 'amount' => 5 ], [ 'method' => 'cash', 'amount' => 5 ], [ 'method' => 'bazaar_card_terminal', 'amount' => 5 ] ],
+  'legs'          => [ [ 'method' => 'cash', 'tendered_minor' => 400 ], [ 'method' => 'bazaar_card_terminal', 'reference' => 'SLIP-A111' ], [ 'method' => 'bazaar_card_terminal', 'reference' => 'SLIP-B222' ] ],
+];
+$t = $A::tenders( $args( $reordered ), 1500 );
+check( 'legs: matched by method when the index differs, each used once', [ $t[0]['reference'], $t[2]['reference'] ], [ 'SLIP-A111', 'SLIP-B222' ] );
+check( 'legs: a tendered amount below the leg is ignored', $t[1]['tendered_minor'], 500 );
+check( 'legs: no legs[] keeps the old mapping', $A::tenders( $args( [ 'paymentMethod' => 'bazaar_split', 'splitPayments' => [ [ 'method' => 'bazaar_card_terminal', 'amount' => 1 ] ] ] ), 100 )[0]['reference'], '' );
+
+// A committed row is a paid sale: success, never a failure to retry (finding 9).
+check( 'committed: finalize pending answers success with the order', $A::committed_answer( [ 'state' => 'committed', 'order_id' => '41' ], 'wc_order_x' ), [ 'success' => true, 'order_id' => 41, 'order_key' => 'wc_order_x', 'finalize_pending' => true, 'message' => $A::MSG_FINALIZE_PENDING ] );
+check( 'committed: a completed row answers plain success', $A::committed_answer( [ 'state' => 'completed', 'order_id' => 41 ] ), [ 'success' => true, 'order_id' => 41, 'order_key' => '' ] );
+foreach ( [ 'failed', 'cancelled', 'order_created', 'priced', 'received' ] as $state ) {
+  check( "committed: a $state row is not a sale", $A::committed_answer( [ 'state' => $state, 'order_id' => 41 ] ), null );
+}
+check( 'committed: no row is not a sale', $A::committed_answer( null ), null );
+check( 'committed: a committed row without an order is not a sale', $A::committed_answer( [ 'state' => 'committed', 'order_id' => null ] ), null );
+
+// The ignored cashier id is noted, as the old handler did.
+check( 'cashier: another id gives the note', $A::ignored_cashier_note( $args( [ 'cashierId' => '9' ] ), 3 ), 'The register sent cashier id 9. It was ignored; the sale is recorded for user 3.' );
+check( 'cashier: the acting user gives no note', $A::ignored_cashier_note( $args( [ 'cashierId' => 3 ] ), 3 ), '' );
+check( 'cashier: none or junk gives no note', [ $A::ignored_cashier_note( $args( [] ), 3 ), $A::ignored_cashier_note( $args( [ 'cashierId' => 'abc' ] ), 3 ), $A::ignored_cashier_note( $args( [ 'cashierId' => 0 ] ), 3 ) ], [ '', '', '' ] );
+
 bazaar_test_standalone( __FILE__ );
