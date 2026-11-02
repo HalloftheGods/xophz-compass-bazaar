@@ -2,6 +2,34 @@
 
 All notable changes to the Compass Bazaar plugin. Newest first.
 
+## 2026-11-01
+
+### Added
+Bazaar Core v2, Phase 1 (spec: `docs/plugins/bazaar-core-v2.md` in the root repo). This entry summarizes the work package commits (#6939 to #6996); it does not replace the per-commit messages, and it does not claim every Phase 1 path is exercised against a live store.
+- **Core foundation** (#6939): autoloader, module manifest, `Core_Db` transactions (after-commit and after-rollback callbacks are best effort), money, canonical and request helpers, REST helpers, and a schema installer for ten tables plus an outbox.
+- **Capabilities and security** (#6940): capabilities, roles, a central admin-ajax policy, a guard, and a REST permission factory.
+- **Stock ledger** (#6941, #6945, #6951, #6987): ledger domain and service, wpdb store with WooCommerce projection, locations and modes (including shadow), observer, ledger-owned order lifecycle, backfill, audit, the `wp bazaar` CLI, and REST routes for movements, balances, adjustments and mode. Product stock updates, product saves, the product CSV import and multi-inventory writes go through the ledger (#6953); multi-inventory writes use `bazaar_manage_stock`.
+- **Pricing** (#6948): cart request schema, pricer using `WC_Discounts` coupons, line-level discounts, order-parity tax, tax location filter, and the quote and POS config routes.
+- **Payments** (#6942, #6949): `PaymentProvider` interface, classifier, registry, four pure providers, `Pos_Authorization::peek`, and payments and refunds repositories with refund allocation and a shift summary.
+- **Staff** (#6947): PINs with lockout, staff sessions, per-role limits, one-time approvals, and staff REST routes.
+- **Checkout v2** (#6952): state machine, validated request with request hash, repository, order writer, service, finalizer, sweeper, payment hooks, and the REST checkouts route. Legacy `create_pos_order` runs through checkout v2 with a rollback switch (#6956).
+- **Refunds v2** (#6957): service with per-rate tax, approvals, tender allocation, a REST route and a legacy adapter.
+
+### Changed
+- The shift summary email is built from server totals and follows the staff session (#6956, #6996).
+- POS refund and sale paths in the SPA were adjusted alongside these services (#6994).
+
+### Fixed
+Review fixes landed after the features above; see the commit messages for detail.
+- Checkout: a committed sale is never cancelled, and orders saved but never recorded are cancelled (#6985, #6952); POS sales attach only store customers, never staff accounts.
+- Stock: overlapping ledger sales no longer deadlock, observed changes book at their location, and one failing after-commit listener cannot skip the rest (#6987, #6989).
+- Staff: PIN and password attempts are counted before the hash check and throttled per operator and address (#6986).
+- Refunds: cash before terminal, per-rate limit rounding, discount fees and an approval id on the refund row (#6995); the legacy adapter reports committed sales as success (#6996).
+- Test portal token amounts follow store price decimals (#6988).
+
+### Security
+- Staff-session handling: a late `staff_session_invalid` for an old token no longer ends a newer staff session; discount limits follow the staff limits (#6994).
+
 ## 2026-10-30
 
 ### Security
