@@ -17,17 +17,19 @@
  *   A header naming no live session for this operator and device is refused
  *   ("The staff session is not valid. Enter the PIN again.").
  * - Sales the rollback body (Checkout_Legacy_Writer) recorded have no
- *   checkout or payment rows; they are added from their WooCommerce orders
- *   (Checkout_Legacy_Writer::shift_totals) for the same window and cashier,
- *   and the email says how many there were.
+ *   checkout or payment rows; outside a staff session they are added from
+ *   their WooCommerce orders (Checkout_Legacy_Writer::shift_totals) for the
+ *   same window and cashier, and the email says how many there were. A
+ *   staff-session scope never adds them (legacy_query), whatever the staff
+ *   member's capabilities: they belong to no session.
  * - Recipients are the acting user and the operator. The register's
  *   cashierId is not read.
  *
  * Not guaranteed: it reports what the checkout and payment rows say; it does
  * not reconcile a cash drawer. Coupons and custom discounts are one
  * "Discounts" figure. Rollback sales are attributed to the logged-in user
- * (never a staff session), so a staff member's own scope does not include
- * them; their refunds are not counted.
+ * (never a staff session), so a staff-session email does not include them;
+ * their refunds are not counted.
  *
  * @package    Xophz_Compass_Bazaar
  * @subpackage Xophz_Compass_Bazaar/admin
@@ -132,12 +134,18 @@ class Xophz_Compass_Bazaar_Admin_Pos_Shift {
     return $summary;
   }
 
-  /** The [from, to) UTC window the rollback sales are read for. */
-  private static function legacy_window( array $scope, ?array $session ): array {
-    if ( isset( $scope['from'], $scope['to'] ) ) {
-      return [ (string) $scope['from'], (string) $scope['to'] ];
+  /**
+   * Pure. The rollback-sale query for this scope: [from, to, cashier_user_id]
+   * (cashier 0 = every cashier), or null when none are added. A staff-session
+   * scope gets null: rollback sales are never a staff session's, and an
+   * unscoped query there would add every register's sales since the session
+   * started to a session's email.
+   */
+  public static function legacy_query( Xophz_Compass_Bazaar_Security_Context $ctx, array $scope ): ?array {
+    if ( $ctx->is_staff_session() || isset( $scope['staff_session_id'] ) || ! isset( $scope['from'], $scope['to'] ) ) {
+      return null;
     }
-    return [ (string) ( $session['started_at'] ?? gmdate( 'Y-m-d H:i:s' ) ), gmdate( 'Y-m-d H:i:s', time() + 1 ) ];
+    return [ (string) $scope['from'], (string) $scope['to'], (int) ( $scope['cashier_user_id'] ?? 0 ) ];
   }
 
   private static function holds_any( int $user_id, string ...$caps ): bool {
@@ -179,10 +187,12 @@ class Xophz_Compass_Bazaar_Admin_Pos_Shift {
         ? self::holds_any( $ctx->acting_user_id, $caps::VIEW_REPORTS, $caps::MANAGE_ORDERS )
         : Xophz_Compass_Bazaar_Security_Guard::can_any( $caps::VIEW_REPORTS, $caps::MANAGE_ORDERS );
       $scope    = self::scope( $ctx, $sees_all );
-      list( $from, $to ) = self::legacy_window( $scope, $resolved['session'] );
+      $legacy_q = self::legacy_query( $ctx, $scope );
       $summary  = self::merge(
         Xophz_Compass_Bazaar_Rest_Checkouts::summary( $scope ),
-        Xophz_Compass_Bazaar_Checkout_Legacy_Writer::shift_totals( $from, $to, (int) ( $scope['cashier_user_id'] ?? 0 ) ),
+        null === $legacy_q
+          ? Xophz_Compass_Bazaar_Checkout_Legacy_Writer::fold( [] )
+          : Xophz_Compass_Bazaar_Checkout_Legacy_Writer::shift_totals( $legacy_q[0], $legacy_q[1], $legacy_q[2] ),
         [ 'Xophz_Compass_Bazaar_Payments_Classifier', 'kind' ]
       );
 

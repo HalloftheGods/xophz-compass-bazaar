@@ -44,6 +44,7 @@ OPTION_BEFORE=""
 OPTION_SET=0
 CASHIER_ID=""
 OTHER_ID=""
+MANAGER_ID=""
 RUN_ID="$(date +%s)"
 DEVICE="legacyck-dev-$RUN_ID"
 
@@ -157,9 +158,9 @@ teardown() {
   if [ -n "$COUPON_ID" ]; then
     wp_eval "wp_delete_post($COUPON_ID, true);" >/dev/null
   fi
-  if [ -n "$CASHIER_ID$OTHER_ID" ]; then
+  if [ -n "$CASHIER_ID$OTHER_ID$MANAGER_ID" ]; then
     wp_eval "global \$wpdb; require_once ABSPATH . 'wp-admin/includes/user.php';
-foreach (array_filter(['$CASHIER_ID', '$OTHER_ID']) as \$id) {
+foreach (array_filter(['$CASHIER_ID', '$OTHER_ID', '$MANAGER_ID']) as \$id) {
   \$wpdb->delete(Xophz_Compass_Bazaar_Core_Db::table('staff'), ['user_id' => (int) \$id]);
   \$wpdb->query(\$wpdb->prepare('DELETE FROM ' . Xophz_Compass_Bazaar_Core_Db::table('staff_sessions') . ' WHERE staff_user_id = %d', (int) \$id));
   wp_delete_user((int) \$id);
@@ -378,6 +379,26 @@ echo "sale=" . (int) ($res["body"]["order"]["id"] ?? 0) . "," . $total;' | tail 
   expect_equal 'rollback email: counts the v2 and the rollback sale' "$(sed -n 's/^MAIL_ORDERS //p' <<<"$out")" '2'
   expect_equal 'rollback email: gross includes the rollback sale' "$(sed -n 's/^MAIL_GROSS //p' <<<"$out")" "$ROLL_MONEY"
   expect_equal 'rollback email: says rollback sales are included' "$(sed -n 's/^MAIL_LEGACY //p' <<<"$out")" 'yes'
+
+  # rf4 review: a view_reports staff member's session on a register whose
+  # operator only sells. A rollback sale rung by another user on another
+  # register during the session is not the session's: it is not counted.
+  msetup="$(wp_eval '
+$m = wp_insert_user(["user_login" => "legacyck_manager_'"$RUN_ID"'", "user_pass" => wp_generate_password(24), "user_email" => "legacyck.manager.'"$RUN_ID"'@example.invalid", "role" => "bazaar_supervisor"]);
+$now = gmdate("Y-m-d H:i:s"); $tok = bin2hex(random_bytes(16));
+Xophz_Compass_Bazaar_Core_Db::insert(Xophz_Compass_Bazaar_Core_Db::table("staff"), ["user_id" => $m, "active" => 1, "updated_at" => $now]);
+$sid = Xophz_Compass_Bazaar_Core_Db::insert(Xophz_Compass_Bazaar_Core_Db::table("staff_sessions"), ["token_hash" => Xophz_Compass_Bazaar_Staff_Sessions::hash_token($tok), "staff_user_id" => $m, "operator_user_id" => '"$CASHIER_ID"', "device_id" => "'"$DEVICE"'-m", "location_id" => 0, "started_at" => $now, "last_seen_at" => $now, "idle_expires_at" => gmdate("Y-m-d H:i:s", time() + 900), "expires_at" => gmdate("Y-m-d H:i:s", time() + 3600), "end_reason" => ""]);
+echo "mgr=$m," . (user_can($m, "bazaar_view_reports") ? 1 : 0) . ",$sid,$tok";' | tail -1)"
+  IFS=',' read -r MANAGER_ID MANAGER_REPORTS MSESSION_ID MTOKEN <<<"${msetup#mgr=}"
+  expect_equal 'manager: the staff member holds bazaar_view_reports' "${MANAGER_REPORTS:-}" '1'
+  out="$(run "{\"items\":[{\"product_id\":$PRODUCT_ID,\"quantity\":1}],\"paymentMethod\":\"cash\"}" -e CALL_PIPELINE=legacy)"
+  expect 'manager: another user sells through the old body during the session' "$out" '"success":true'
+  ID="$(order_id_of "$out")"
+  expect_equal 'manager: that sale has no checkout row' "$(checkout_state "$ID")" 'none'
+  out="$(run '{}' -e CALL_CLASS=Xophz_Compass_Bazaar_Admin_Pos_Shift -e CALL_METHOD=emailShiftSummary -e CALL_MAIL=1 -e CALL_USER="$CASHIER_ID" -e CALL_STAFF="$MTOKEN" -e CALL_DEVICE="$DEVICE-m")"
+  expect_equal 'manager email: the other register rollback sale is not counted' "$(sed -n 's/^MAIL_ORDERS //p' <<<"$out")" '0'
+  expect_equal 'manager email: no rollback sales are included' "$(sed -n 's/^MAIL_LEGACY //p' <<<"$out")" 'no'
+  expect_equal 'manager email: sent to the staff member and the operator' "$(sed -n 's/^MAIL_TO //p' <<<"$out" | tr ',' '\n' | sed 's/.*legacyck\.manager.*/manager/;t;s/.*legacyck\.cashier.*/operator/;t;s/.*/other/' | sort | tr '\n' ' ')" 'manager operator '
 fi
 
 bz_finish

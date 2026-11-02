@@ -63,6 +63,14 @@ check( 'context: no header is the operator', [ $r['context']->acting_user_id, $r
 $r = $H::request_context( 7, [ 'HTTP_X_BAZAAR_DEVICE' => 'reg-1', 'HTTP_X_BAZAAR_STAFF_SESSION' => 'tok-alice' ], $live );
 check( 'context: a live session makes its staff member the acting user', [ $r['context']->operator_user_id, $r['context']->acting_user_id, $r['context']->staff_session_id, $r['session']['started_at'] ], [ 7, 12, 55, '2026-11-01 14:00:00' ] );
 check( 'context: the session scope follows it', $H::scope( $r['context'], false ), [ 'staff_session_id' => 55, 'cashier_user_id' => 12 ] );
+// Rollback sales are never a staff session's (rf4 review: an unscoped query
+// there added every register's sales to a view_reports staff member's email).
+check( 'legacy query: a staff session with view_reports adds no rollback sales', $H::legacy_query( $r['context'], $H::scope( $r['context'], true ) ), null );
+check( 'legacy query: a staff session without view_reports adds none either', $H::legacy_query( $r['context'], $H::scope( $r['context'], false ) ), null );
+$op = Xophz_Compass_Bazaar_Security_Context::for_operator( 7 );
+check( 'legacy query: the operator who sees all reads every cashier today', $H::legacy_query( $op, [ 'from' => '2026-11-01 05:00:00', 'to' => '2026-11-01 18:00:00' ] ), [ '2026-11-01 05:00:00', '2026-11-01 18:00:00', 0 ] );
+check( 'legacy query: the operator own scope reads their own sales', $H::legacy_query( $op, [ 'from' => 'a', 'to' => 'b', 'cashier_user_id' => 7 ] ), [ 'a', 'b', 7 ] );
+check( 'legacy query: a session scope is refused even from an operator context', $H::legacy_query( $op, [ 'staff_session_id' => 55 ] ), null );
 check( 'context: a token from another device is refused', $H::request_context( 7, [ 'HTTP_X_BAZAAR_DEVICE' => 'reg-2', 'HTTP_X_BAZAAR_STAFF_SESSION' => 'tok-alice' ], $live ), null );
 check( 'context: an unknown token is refused', $H::request_context( 7, [ 'HTTP_X_BAZAAR_DEVICE' => 'reg-1', 'HTTP_X_BAZAAR_STAFF_SESSION' => 'tok-bob' ], $live ), null );
 check( 'context: an empty header is refused', $H::request_context( 7, [ 'HTTP_X_BAZAAR_STAFF_SESSION' => '  ' ], $live ), null );
