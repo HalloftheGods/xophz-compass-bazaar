@@ -11,11 +11,23 @@
  * coupons, customDiscounts, totalTips, totalOrders) are not read. Without
  * bazaar_view_reports or bazaar_manage_orders the figures are the acting
  * cashier's own.
+ * - The staff session is the one named by the X-Bazaar-Staff-Session header
+ *   (with X-Bazaar-Device), resolved as rest_permission does: the session's
+ *   staff member is the acting user, and the capabilities checked are theirs.
+ *   A header naming no live session for this operator and device is refused
+ *   ("The staff session is not valid. Enter the PIN again.").
+ * - Sales the rollback body (Checkout_Legacy_Writer) recorded have no
+ *   checkout or payment rows; they are added from their WooCommerce orders
+ *   (Checkout_Legacy_Writer::shift_totals) for the same window and cashier,
+ *   and the email says how many there were.
+ * - Recipients are the acting user and the operator. The register's
+ *   cashierId is not read.
  *
  * Not guaranteed: it reports what the checkout and payment rows say; it does
  * not reconcile a cash drawer. Coupons and custom discounts are one
- * "Discounts" figure. The register's cashierId, if it names another user with
- * an email address, still adds that address to the recipients.
+ * "Discounts" figure. Rollback sales are attributed to the logged-in user
+ * (never a staff session), so a staff member's own scope does not include
+ * them; their refunds are not counted.
  *
  * @package    Xophz_Compass_Bazaar
  * @subpackage Xophz_Compass_Bazaar/admin
@@ -62,6 +74,81 @@ class Xophz_Compass_Bazaar_Admin_Pos_Shift {
     return $scope;
   }
 
+  /**
+   * The context of this request: the staff session the X-Bazaar-Staff-Session
+   * header names, else the operator. Null when the header names no live
+   * session for this operator and device.
+   *
+   * @param array         $server  $_SERVER.
+   * @param callable|null $resolve fn(token, operator, device): ?array, default Staff_Sessions::resolve.
+   * @return array{context:Xophz_Compass_Bazaar_Security_Context,session:?array}|null
+   */
+  public static function request_context( int $operator, array $server, ?callable $resolve = null ): ?array {
+    $G      = 'Xophz_Compass_Bazaar_Security_Guard';
+    $device = $G::clean_device( $server['HTTP_X_BAZAAR_DEVICE'] ?? '' );
+    if ( ! array_key_exists( 'HTTP_X_BAZAAR_STAFF_SESSION', $server ) ) {
+      return [ 'context' => Xophz_Compass_Bazaar_Security_Context::for_operator( $operator, $device ), 'session' => null ];
+    }
+    $token = is_scalar( $server['HTTP_X_BAZAAR_STAFF_SESSION'] ) ? trim( (string) $server['HTTP_X_BAZAAR_STAFF_SESSION'] ) : '';
+    if ( '' === $token || $operator <= 0 ) {
+      return null;
+    }
+    try {
+      $session = ( $resolve ?? [ 'Xophz_Compass_Bazaar_Staff_Sessions', 'resolve' ] )( $token, $operator, $device );
+    } catch ( \Throwable $e ) {
+      error_log( 'bazaar_shift_staff_session_error:' . get_class( $e ) );
+      return null;
+    }
+    $context = $G::context_from_session( $session, $operator, $device );
+    return null === $context ? null : [ 'context' => $context, 'session' => (array) $session ];
+  }
+
+  /** Pure. The distinct valid addresses, in order. */
+  public static function recipients( array $emails ): array {
+    $out = [];
+    foreach ( $emails as $email ) {
+      $email = is_string( $email ) ? trim( $email ) : '';
+      if ( '' !== $email && false !== filter_var( $email, FILTER_VALIDATE_EMAIL ) && ! in_array( strtolower( $email ), array_map( 'strtolower', $out ), true ) ) {
+        $out[] = $email;
+      }
+    }
+    return $out;
+  }
+
+  /**
+   * Pure. The summary with the rollback sales added (Checkout_Legacy_Writer::fold
+   * shape). $kind maps a method id to its tender kind.
+   */
+  public static function merge( array $summary, array $legacy, callable $kind ): array {
+    $summary['orders']          = (int) ( $summary['orders'] ?? 0 ) + (int) ( $legacy['orders'] ?? 0 );
+    $summary['gross_minor']     = (int) ( $summary['gross_minor'] ?? 0 ) + (int) ( $legacy['gross_minor'] ?? 0 );
+    $summary['tips_minor']      = (int) ( $summary['tips_minor'] ?? 0 ) + (int) ( $legacy['tips_minor'] ?? 0 );
+    $summary['discounts_minor'] = (int) ( $summary['discounts_minor'] ?? 0 ) + (int) ( $legacy['discounts_minor'] ?? 0 );
+    $summary['by_kind']         = (array) ( $summary['by_kind'] ?? [] );
+    foreach ( (array) ( $legacy['by_method'] ?? [] ) as $method => $m ) {
+      $summary['by_kind'][] = [ 'kind' => (string) $kind( (string) $method ), 'method_id' => (string) $method, 'count' => (int) $m['count'], 'amount_minor' => (int) $m['amount_minor'], 'legacy' => true ];
+    }
+    $summary['legacy_orders'] = (int) ( $legacy['orders'] ?? 0 );
+    return $summary;
+  }
+
+  /** The [from, to) UTC window the rollback sales are read for. */
+  private static function legacy_window( array $scope, ?array $session ): array {
+    if ( isset( $scope['from'], $scope['to'] ) ) {
+      return [ (string) $scope['from'], (string) $scope['to'] ];
+    }
+    return [ (string) ( $session['started_at'] ?? gmdate( 'Y-m-d H:i:s' ) ), gmdate( 'Y-m-d H:i:s', time() + 1 ) ];
+  }
+
+  private static function holds_any( int $user_id, string ...$caps ): bool {
+    foreach ( $caps as $cap ) {
+      if ( $user_id > 0 && user_can( $user_id, $cap ) ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private static function money( int $minor ): string {
     return number_format( (float) Xophz_Compass_Bazaar_Core_Money::from_minor( $minor ), 2 );
   }
@@ -71,7 +158,6 @@ class Xophz_Compass_Bazaar_Admin_Pos_Shift {
       if ( ! Xophz_Compass_Bazaar_Security_Guard::can_any( 'bazaar_sell' ) ) {
         throw new \Exception( 'Permission denied.' );
       }
-      $args         = Xophz_Compass_Bazaar_Core_Request::legacy_args();
       $current_user = wp_get_current_user();
 
       if ( ! $current_user || ! $current_user->exists() ) {
@@ -80,8 +166,25 @@ class Xophz_Compass_Bazaar_Admin_Pos_Shift {
       }
 
       $caps     = 'Xophz_Compass_Bazaar_Security_Capabilities';
-      $sees_all = Xophz_Compass_Bazaar_Security_Guard::can_any( $caps::VIEW_REPORTS, $caps::MANAGE_ORDERS );
-      $summary  = Xophz_Compass_Bazaar_Rest_Checkouts::summary( self::scope( Xophz_Compass_Bazaar_Security_Guard::context(), $sees_all ) );
+      $resolved = self::request_context( (int) $current_user->ID, $_SERVER );
+      if ( null === $resolved ) {
+        $this->send_json_response( [ 'success' => false, 'message' => 'The staff session is not valid. Enter the PIN again.', 'code' => 'staff_session_invalid' ] );
+        return;
+      }
+      $ctx = $resolved['context'];
+      if ( $ctx->is_staff_session() && ! self::holds_any( $ctx->acting_user_id, $caps::SELL ) ) {
+        throw new \Exception( 'Permission denied.' );
+      }
+      $sees_all = $ctx->is_staff_session()
+        ? self::holds_any( $ctx->acting_user_id, $caps::VIEW_REPORTS, $caps::MANAGE_ORDERS )
+        : Xophz_Compass_Bazaar_Security_Guard::can_any( $caps::VIEW_REPORTS, $caps::MANAGE_ORDERS );
+      $scope    = self::scope( $ctx, $sees_all );
+      list( $from, $to ) = self::legacy_window( $scope, $resolved['session'] );
+      $summary  = self::merge(
+        Xophz_Compass_Bazaar_Rest_Checkouts::summary( $scope ),
+        Xophz_Compass_Bazaar_Checkout_Legacy_Writer::shift_totals( $from, $to, (int) ( $scope['cashier_user_id'] ?? 0 ) ),
+        [ 'Xophz_Compass_Bazaar_Payments_Classifier', 'kind' ]
+      );
 
       $cash = 0;
       $card = 0;
@@ -115,19 +218,18 @@ class Xophz_Compass_Bazaar_Admin_Pos_Shift {
           <div style='display: flex; justify-content: space-between; font-size: 18px; font-weight: bold;'>
               <span>Total Shift Sales:</span>
               <span>$" . self::money( (int) $summary['gross_minor'] ) . "</span>
-          </div>
+          </div>" . ( $summary['legacy_orders'] > 0 ? "
+          <p style='color: #666; font-size: 13px;'>Includes " . (int) $summary['legacy_orders'] . " sale(s) recorded by the rollback checkout, read from their WooCommerce orders. Their refunds are not counted.</p>" : '' ) . "
       </div>
       ";
 
       $headers = [ 'Content-Type: text/html; charset=UTF-8' ];
 
-      $recipients = [ $current_user->user_email ];
-      $cashierId  = isset( $args->cashierId ) ? intval( $args->cashierId ) : 0;
-      if ( $cashierId && $cashierId !== $current_user->ID ) {
-        $cashier_user = get_userdata( $cashierId );
-        if ( $cashier_user && ! empty( $cashier_user->user_email ) ) {
-          $recipients[] = $cashier_user->user_email;
-        }
+      $acting     = $ctx->acting_user_id === (int) $current_user->ID ? $current_user : get_userdata( $ctx->acting_user_id );
+      $recipients = self::recipients( [ $acting ? $acting->user_email : '', $current_user->user_email ] );
+      if ( ! $recipients ) {
+        $this->send_json_response( [ 'success' => false, 'message' => 'No email address to send the summary to.' ] );
+        return;
       }
 
       $sent = wp_mail( $recipients, "POS Shift Summary - $site_name", $html, $headers );

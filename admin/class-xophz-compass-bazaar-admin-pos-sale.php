@@ -7,9 +7,11 @@
  * Guaranteed: create_pos_order keeps its permission check and its answer,
  * {success:true, order_id, order_key} or {success:false, message}, sent as
  * before. It reads the request through Core_Request::legacy_args() and routes
- * on the option bazaar_checkout_pipeline: "v2" (also when the option is unset
- * or holds anything else) runs Checkout_Legacy_Adapter, "legacy" runs
- * Checkout_Legacy_Writer, the old body kept for one release as the rollback.
+ * with route(): Checkout_Legacy_Writer, the old body kept for one release as
+ * the rollback, when the option bazaar_checkout_pipeline is "legacy" OR
+ * checkout v2 is off (bazaar_pos_checkout_v2=no, which also puts the SPA on
+ * this action, spec 17); else Checkout_Legacy_Adapter (also when the
+ * pipeline option is unset or holds anything else).
  *
  * Not guaranteed: the v2 route applies checkout v2 rules the old handler did
  * not (see Checkout_Legacy_Adapter). The legacy route is the old behavior: it
@@ -97,10 +99,22 @@ class Xophz_Compass_Bazaar_Admin_Pos_Sale {
     return $amount;
   }
 
-  /** "legacy" only when the option says so; every other value is v2. */
+  /**
+   * Pure. "legacy" when the pipeline option says so or checkout v2 is off
+   * (either rollback switch brings the old body back); every other case is v2.
+   *
+   * @param mixed $option The bazaar_checkout_pipeline value.
+   */
+  public static function route( $option, bool $v2_enabled ): string {
+    if ( ! $v2_enabled ) {
+      return 'legacy';
+    }
+    return 'legacy' === ( is_string( $option ) ? strtolower( trim( $option ) ) : '' ) ? 'legacy' : 'v2';
+  }
+
+  /** route() for this site's options. */
   public static function pipeline(): string {
-    $value = get_option( self::PIPELINE_OPTION, 'v2' );
-    return 'legacy' === ( is_string( $value ) ? strtolower( trim( $value ) ) : '' ) ? 'legacy' : 'v2';
+    return self::route( get_option( self::PIPELINE_OPTION, 'v2' ), Xophz_Compass_Bazaar_Checkout_Service::enabled() );
   }
 
   public function createPosOrder() {

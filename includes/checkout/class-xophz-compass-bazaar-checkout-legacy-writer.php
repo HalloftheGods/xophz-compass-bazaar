@@ -17,6 +17,13 @@
  * WooCommerce holds, records no checkout row, no idempotency and no payment
  * rows, and deletes the order when a step fails.
  *
+ * shift_totals() reads this body's sales back for the shift email, since they
+ * have no checkout or payment rows: POS orders (created_via bazaar_pos) in a
+ * sale status (completed, processing, on-hold) with no checkout row. It counts
+ * order totals by payment method (a split by its _pos_split_payments legs),
+ * _pos_tip_amount, and coupon discounts plus negative fees other than "Tip".
+ * Refunds of these orders are not counted.
+ *
  * @package    Xophz_Compass_Bazaar
  * @subpackage Xophz_Compass_Bazaar/includes/checkout
  */
@@ -302,5 +309,104 @@ class Xophz_Compass_Bazaar_Checkout_Legacy_Writer {
       }
       return [ 'success' => false, 'message' => $e->getMessage() ];
     }
+  }
+
+  /** Order statuses this body leaves a successful sale in. */
+  const SALE_STATUSES = [ 'completed', 'processing', 'on-hold' ];
+
+  /**
+   * Shift figures for this body's sales created in [$from_utc, $to_utc)
+   * (UTC 'Y-m-d H:i:s'); with $cashier_user_id > 0, only orders whose
+   * _pos_cashier_id is that user. Shape: fold().
+   */
+  public static function shift_totals( string $from_utc, string $to_utc, int $cashier_user_id = 0 ): array {
+    $from = strtotime( $from_utc . ' UTC' );
+    $to   = strtotime( $to_utc . ' UTC' );
+    if ( false === $from || false === $to || $to <= $from || ! function_exists( 'wc_get_orders' ) ) {
+      return self::fold( [] );
+    }
+    $orders = wc_get_orders( [
+      'limit'        => -1,
+      'created_via'  => 'bazaar_pos',
+      'status'       => self::SALE_STATUSES,
+      'date_created' => $from . '...' . ( $to - 1 ),
+    ] );
+    $orders = array_filter( (array) $orders, function ( $o ) use ( $cashier_user_id ) {
+      return $o instanceof WC_Order && ( $cashier_user_id <= 0 || (int) $o->get_meta( '_pos_cashier_id' ) === $cashier_user_id );
+    } );
+    $ids = array_map( function ( $o ) {
+      return (int) $o->get_id();
+    }, array_values( $orders ) );
+    $v2 = [];
+    if ( $ids ) {
+      $rows = Xophz_Compass_Bazaar_Core_Db::get_results(
+        'SELECT order_id FROM ' . Xophz_Compass_Bazaar_Core_Db::table( 'checkouts' ) . ' WHERE order_id IN (' . implode( ',', array_fill( 0, count( $ids ), '%d' ) ) . ')',
+        $ids
+      );
+      foreach ( $rows as $row ) {
+        $v2[ (int) $row->order_id ] = true;
+      }
+    }
+    $sales = [];
+    foreach ( $orders as $order ) {
+      if ( ! isset( $v2[ (int) $order->get_id() ] ) ) {
+        $sales[] = self::sale_figures( $order );
+      }
+    }
+    return self::fold( $sales );
+  }
+
+  /**
+   * Pure. Add up sales given as {method, total_minor, tip_minor,
+   * discount_minor, legs:[{method, amount_minor}]}. A sale with legs counts
+   * each leg under its method; one without counts its total under its method.
+   *
+   * @return array{orders:int,gross_minor:int,tips_minor:int,discounts_minor:int,by_method:array<string,array{count:int,amount_minor:int}>}
+   */
+  public static function fold( array $sales ): array {
+    $out = [ 'orders' => 0, 'gross_minor' => 0, 'tips_minor' => 0, 'discounts_minor' => 0, 'by_method' => [] ];
+    foreach ( $sales as $sale ) {
+      $total = (int) ( $sale['total_minor'] ?? 0 );
+      ++$out['orders'];
+      $out['gross_minor']     += $total;
+      $out['tips_minor']      += (int) ( $sale['tip_minor'] ?? 0 );
+      $out['discounts_minor'] += (int) ( $sale['discount_minor'] ?? 0 );
+      $legs = ! empty( $sale['legs'] ) ? $sale['legs'] : [ [ 'method' => (string) ( $sale['method'] ?? '' ), 'amount_minor' => $total ] ];
+      foreach ( $legs as $leg ) {
+        $method = strtolower( (string) ( $leg['method'] ?? '' ) );
+        if ( ! isset( $out['by_method'][ $method ] ) ) {
+          $out['by_method'][ $method ] = [ 'count' => 0, 'amount_minor' => 0 ];
+        }
+        ++$out['by_method'][ $method ]['count'];
+        $out['by_method'][ $method ]['amount_minor'] += (int) ( $leg['amount_minor'] ?? 0 );
+      }
+    }
+    return $out;
+  }
+
+  /** One order as fold() reads it. */
+  private static function sale_figures( WC_Order $order ): array {
+    $M        = 'Xophz_Compass_Bazaar_Core_Money';
+    $discount = (float) $order->get_discount_total();
+    foreach ( $order->get_fees() as $fee ) {
+      if ( 'Tip' !== $fee->get_name() && (float) $fee->get_total() < 0 ) {
+        $discount += abs( (float) $fee->get_total() );
+      }
+    }
+    $legs = [];
+    if ( 'bazaar_split' === $order->get_payment_method() ) {
+      foreach ( (array) json_decode( (string) $order->get_meta( '_pos_split_payments' ), true ) as $leg ) {
+        if ( is_array( $leg ) && is_numeric( $leg['amount'] ?? null ) ) {
+          $legs[] = [ 'method' => (string) ( $leg['method'] ?? '' ), 'amount_minor' => $M::to_minor( round( (float) $leg['amount'], 2 ) ) ];
+        }
+      }
+    }
+    return [
+      'method'         => (string) $order->get_payment_method(),
+      'total_minor'    => $M::to_minor( round( (float) $order->get_total(), 2 ) ),
+      'tip_minor'      => $M::to_minor( round( max( 0.0, (float) $order->get_meta( '_pos_tip_amount' ) ), 2 ) ),
+      'discount_minor' => $M::to_minor( round( $discount, 2 ) ),
+      'legs'           => $legs,
+    ];
   }
 }

@@ -12,10 +12,21 @@
 # and email_shift_summary built from server totals, not from the totals the
 # request carries.
 #
+# Review fixes (#6996): a sale whose finalize throws after the commit answers
+# success with finalize_pending (one order, the sweeper finishes it); every
+# combination of bazaar_pos_checkout_v2 and bazaar_checkout_pipeline sells
+# (set per process with pre_option filters, so the other suites sharing the
+# site never see them); an SPA-shaped split with the slip reference only in
+# legs[] succeeds; the shift email under a staff session header is scoped to
+# that session and mailed to its staff member and the operator only (never
+# the cashierId sent), an invalid header is refused; rollback-body sales are
+# counted in the email.
+#
 # It sets the option bazaar_checkout_pipeline and restores the value it found
 # (or deletes it) at the end, also when a check fails. It creates a private
-# product and a coupon and deletes them and their orders at the end. Run it
-# only against a development store.
+# product, a coupon, two users with a staff row and a staff session, and
+# deletes them and their orders at the end. Run it only against a
+# development store.
 #
 # Run from the repo root: bash wp-content/plugins/xophz-compass-bazaar/tests/integration/checkout-legacy.sh
 set -u
@@ -26,10 +37,78 @@ source "$HERE/lib.sh"
 docker cp "$HERE/call-handler.php" "$CONTAINER:/tmp/bazaar-call-handler.php" >/dev/null
 TMP="$(mktemp -d)"
 MAIL_PHP="$TMP/mail.php"
+RUN_PHP="$TMP/legacy-run.php"
 PRODUCT_ID=""
 COUPON_ID=""
 OPTION_BEFORE=""
 OPTION_SET=0
+CASHIER_ID=""
+OTHER_ID=""
+RUN_ID="$(date +%s)"
+DEVICE="legacyck-dev-$RUN_ID"
+
+# One handler call in its own wp-cli process. Env: CALL_CLASS, CALL_METHOD,
+# CALL_ARGS (JSON; arrays sent as JSON strings), CALL_USER (default the first
+# administrator), CALL_V2 / CALL_PIPELINE (per-process option values),
+# CALL_FAIL_AT (test failure point), CALL_STAFF / CALL_DEVICE (headers),
+# CALL_MAIL=1 (print the shift mail's figures instead of sending it).
+cat >"$RUN_PHP" <<'PHP'
+<?php
+$uid = (int) getenv( 'CALL_USER' );
+if ( ! $uid ) {
+  $uid = (int) get_users( [ 'role' => 'administrator', 'number' => 1, 'orderby' => 'ID', 'order' => 'ASC', 'fields' => 'ID' ] )[0];
+}
+wp_set_current_user( $uid );
+$_SERVER['HTTP_X_WP_NONCE'] = wp_create_nonce( 'wp_rest' );
+foreach ( json_decode( getenv( 'CALL_ARGS' ) ?: '{}', true ) as $key => $value ) {
+  $_REQUEST[ $key ] = $_GET[ $key ] = is_array( $value ) ? wp_json_encode( $value ) : (string) $value;
+}
+foreach ( [ 'CALL_V2' => 'bazaar_pos_checkout_v2', 'CALL_PIPELINE' => 'bazaar_checkout_pipeline' ] as $env => $option ) {
+  $value = getenv( $env );
+  if ( false !== $value && '' !== $value ) {
+    add_filter( 'pre_option_' . $option, function () use ( $value ) {
+      return $value;
+    } );
+  }
+}
+if ( getenv( 'CALL_FAIL_AT' ) ) {
+  add_filter( Xophz_Compass_Bazaar_Checkout_Service::FAIL_FILTER, function ( $hit, $point ) {
+    return getenv( 'CALL_FAIL_AT' ) === $point ? $point : $hit;
+  }, 10, 2 );
+}
+if ( false !== getenv( 'CALL_STAFF' ) ) {
+  $_SERVER['HTTP_X_BAZAAR_STAFF_SESSION'] = (string) getenv( 'CALL_STAFF' );
+}
+if ( getenv( 'CALL_DEVICE' ) ) {
+  $_SERVER['HTTP_X_BAZAAR_DEVICE'] = (string) getenv( 'CALL_DEVICE' );
+}
+if ( getenv( 'CALL_MAIL' ) ) {
+  add_filter( 'pre_wp_mail', function ( $short, $atts ) {
+    $mail = (string) $atts['message'];
+    preg_match( "/Total Orders:<\/td><td[^>]*>(\d+)</", $mail, $orders );
+    preg_match( '/Total Shift Sales:<\/span>\s*<span>\$([0-9.,]+)</', $mail, $gross );
+    echo 'MAIL_ORDERS ' . ( $orders[1] ?? '-' ) . "\n";
+    echo 'MAIL_GROSS ' . ( $gross[1] ?? '-' ) . "\n";
+    echo 'MAIL_TO ' . implode( ',', (array) $atts['to'] ) . "\n";
+    echo 'MAIL_LEGACY ' . ( false !== strpos( $mail, 'recorded by the rollback checkout' ) ? 'yes' : 'no' ) . "\n";
+    return true;
+  }, 10, 2 );
+}
+$class = getenv( 'CALL_CLASS' ) ?: 'Xophz_Compass_Bazaar_Admin_Pos_Sale';
+( new $class( 'xophz-compass-bazaar', 'integration' ) )->{getenv( 'CALL_METHOD' ) ?: 'createPosOrder'}();
+PHP
+
+# run <args-json> [docker -e flags...] : createPosOrder (or CALL_CLASS/CALL_METHOD) through RUN_PHP.
+run() {
+  local args="$1"
+  shift
+  wp_file "$RUN_PHP" -e CALL_ARGS="$args" "$@"
+}
+
+# checkout_state <order-id> : the state of the order's checkout row, or "none".
+checkout_state() {
+  wp_eval "\$r = Xophz_Compass_Bazaar_Checkout_Repository::find_by_order((int) '$1'); echo \$r ? \$r['state'] : 'none';" | tail -1
+}
 
 # call <method> <args-json> [docker -e flags...] : run Admin_Pos_Sale::<method>.
 call() {
@@ -77,6 +156,14 @@ teardown() {
   fi
   if [ -n "$COUPON_ID" ]; then
     wp_eval "wp_delete_post($COUPON_ID, true);" >/dev/null
+  fi
+  if [ -n "$CASHIER_ID$OTHER_ID" ]; then
+    wp_eval "global \$wpdb; require_once ABSPATH . 'wp-admin/includes/user.php';
+foreach (array_filter(['$CASHIER_ID', '$OTHER_ID']) as \$id) {
+  \$wpdb->delete(Xophz_Compass_Bazaar_Core_Db::table('staff'), ['user_id' => (int) \$id]);
+  \$wpdb->query(\$wpdb->prepare('DELETE FROM ' . Xophz_Compass_Bazaar_Core_Db::table('staff_sessions') . ' WHERE staff_user_id = %d', (int) \$id));
+  wp_delete_user((int) \$id);
+}" >/dev/null
   fi
   rm -rf "$TMP"
 }
@@ -184,13 +271,19 @@ expect_equal 'unknown option value recorded a checkout row (v2)' "$(( $(checkout
 set_pipeline v2
 
 # 5. email_shift_summary uses server totals, not the totals in the request.
+# Rollback-body sales are part of the server totals (read from their orders).
 cat >"$MAIL_PHP" <<'PHP'
 <?php
 $admins = get_users( [ 'role' => 'administrator', 'number' => 1, 'fields' => 'ID' ] );
 wp_set_current_user( (int) $admins[0] );
 $_POST = [ 'cash' => '987654.32', 'card' => '123456.78', 'totalOrders' => '7777', 'totalTips' => '55555.55', 'coupons' => '4444.44', 'customDiscounts' => '3333.33' ];
-$ctx = Xophz_Compass_Bazaar_Security_Context::for_operator( (int) $admins[0] );
-$sum = Xophz_Compass_Bazaar_Rest_Checkouts::summary( Xophz_Compass_Bazaar_Admin_Pos_Shift::scope( $ctx, true ) );
+$ctx   = Xophz_Compass_Bazaar_Security_Context::for_operator( (int) $admins[0] );
+$scope = Xophz_Compass_Bazaar_Admin_Pos_Shift::scope( $ctx, true );
+$sum   = Xophz_Compass_Bazaar_Admin_Pos_Shift::merge(
+  Xophz_Compass_Bazaar_Rest_Checkouts::summary( $scope ),
+  Xophz_Compass_Bazaar_Checkout_Legacy_Writer::shift_totals( $scope['from'], $scope['to'] ),
+  [ 'Xophz_Compass_Bazaar_Payments_Classifier', 'kind' ]
+);
 echo 'ORDERS ' . (int) $sum['orders'] . "\n";
 // The handler ends the request after it answers, so the mail is checked inside the filter.
 add_filter( 'pre_wp_mail', function ( $short, $atts ) use ( $sum ) {
@@ -209,5 +302,82 @@ expect 'email: the order count is the server count' "$out" 'HAS_ORDERS yes'
 expect 'email: the client order count is not used' "$out" 'HAS_CLIENT_ORDERS no'
 expect 'email: the client cash figure is not used' "$out" 'HAS_CLIENT_CASH no'
 expect 'email: the server gross figure is in the mail' "$out" 'HAS_GROSS yes'
+
+# 6. A committed sale is a success, never a failure to retry (finding 9).
+BEFORE="$(order_count)"
+out="$(run "{\"items\":$ITEMS,\"paymentMethod\":\"cash\"}" -e CALL_FAIL_AT=after_commit -e CALL_PIPELINE=v2)"
+expect 'finalize fails: the sale answers success' "$out" '"success":true'
+expect 'finalize fails: the answer says finalize is pending' "$out" '"finalize_pending":true'
+expect 'finalize fails: the answer carries the order key' "$out" '"order_key":"wc_order_'
+ID="$(order_id_of "$out")"
+expect_equal 'finalize fails: the row stays committed' "$(checkout_state "$ID")" 'committed'
+expect_equal 'finalize fails: exactly one order was made' "$(( $(order_count) - BEFORE ))" '1'
+expect_equal 'finalize fails: the sweeper path completes it' "$(wp_eval "\$r = Xophz_Compass_Bazaar_Checkout_Repository::find_by_order((int) '$ID'); \$d = (new Xophz_Compass_Bazaar_Checkout_Service())->resume(\$r, true); echo \$d ? \$d['state'] : 'null';" | tail -1)" 'completed'
+expect_equal 'finalize fails: the order completes' "$(wp_eval "echo wc_get_order((int) '$ID')->get_status();" | tail -1)" 'completed'
+
+# 7. Both rollback switches, every combination (finding 10).
+for combo in yes:v2:checkout no:v2:none no:legacy:none yes:legacy:none; do
+  IFS=':' read -r v2 pipe want <<<"$combo"
+  out="$(run "{\"items\":$ITEMS,\"paymentMethod\":\"cash\"}" -e CALL_V2="$v2" -e CALL_PIPELINE="$pipe")"
+  expect "switches checkout_v2=$v2 pipeline=$pipe: the sale succeeds" "$out" '"success":true'
+  ID="$(order_id_of "$out")"
+  got="$(checkout_state "$ID")"
+  [ "$got" != 'none' ] && got='checkout'
+  expect_equal "switches checkout_v2=$v2 pipeline=$pipe: $want row" "$got" "$want"
+done
+
+# 8. SPA-shaped split: the slip reference only in legs[] (finding 13).
+SPA_SPLIT="[{\"method\":\"cash\",\"amount\":\"$SPLIT_CASH\"},{\"method\":\"bazaar_card_terminal\",\"amount\":\"$SPLIT_CARD\"}]"
+SPA_LEGS="[{\"method\":\"cash\",\"amount\":$SPLIT_CASH,\"kind\":\"cash\"},{\"method\":\"bazaar_card_terminal\",\"amount\":$SPLIT_CARD,\"kind\":\"external_terminal\",\"reference\":\"SLIP-90299\"}]"
+out="$(run "{\"items\":$ITEMS,\"paymentMethod\":\"bazaar_split\",\"splitPayments\":$SPA_SPLIT,\"legs\":$SPA_LEGS}" -e CALL_PIPELINE=v2)"
+expect 'legs: a split with the reference only in legs[] succeeds' "$out" '"success":true'
+ID="$(order_id_of "$out")"
+expect_equal 'legs: the card capture holds the slip reference' "$(wp_eval "global \$wpdb; echo \$wpdb->get_var(\$wpdb->prepare('SELECT reference FROM ' . Xophz_Compass_Bazaar_Core_Db::table('payments') . ' WHERE order_id = %d AND method_id = %s', (int) '$ID', 'bazaar_card_terminal'));" | tail -1)" 'SLIP-90299'
+
+# 9. Shift email under a staff session (finding 11) and rollback sales (finding 12).
+setup="$(wp_eval '
+$c = wp_insert_user(["user_login" => "legacyck_cashier_'"$RUN_ID"'", "user_pass" => wp_generate_password(24), "user_email" => "legacyck.cashier.'"$RUN_ID"'@example.invalid", "role" => "bazaar_cashier"]);
+$o = wp_insert_user(["user_login" => "legacyck_other_'"$RUN_ID"'", "user_pass" => wp_generate_password(24), "user_email" => "legacyck.other.'"$RUN_ID"'@example.invalid", "role" => "customer"]);
+$admin = (int) get_users(["role" => "administrator", "number" => 1, "orderby" => "ID", "order" => "ASC", "fields" => "ID"])[0];
+$now = gmdate("Y-m-d H:i:s"); $tok = bin2hex(random_bytes(16));
+Xophz_Compass_Bazaar_Core_Db::insert(Xophz_Compass_Bazaar_Core_Db::table("staff"), ["user_id" => $c, "active" => 1, "updated_at" => $now]);
+$sid = Xophz_Compass_Bazaar_Core_Db::insert(Xophz_Compass_Bazaar_Core_Db::table("staff_sessions"), ["token_hash" => Xophz_Compass_Bazaar_Staff_Sessions::hash_token($tok), "staff_user_id" => $c, "operator_user_id" => $admin, "device_id" => "'"$DEVICE"'", "location_id" => 0, "started_at" => $now, "last_seen_at" => $now, "idle_expires_at" => gmdate("Y-m-d H:i:s", time() + 900), "expires_at" => gmdate("Y-m-d H:i:s", time() + 3600), "end_reason" => ""]);
+echo "staff=$c,$o,$admin,$sid,$tok";' | tail -1)"
+IFS=',' read -r CASHIER_ID OTHER_ID ADMIN_ID SESSION_ID TOKEN <<<"${setup#staff=}"
+if ! [[ "${SESSION_ID:-}" =~ ^[0-9]+$ ]]; then
+  echo "staff session setup failed: $setup"
+  FAIL=$((FAIL + 1))
+else
+  # One cash sale rung by the cashier under the session, as the v2 REST route records it.
+  STAFF_SALE="$(wp_eval 'wp_set_current_user('"$ADMIN_ID"'); $A = "Xophz_Compass_Bazaar_Checkout_Legacy_Adapter";
+$ctx = Xophz_Compass_Bazaar_Security_Context::for_staff('"$ADMIN_ID"', '"$CASHIER_ID"', '"$SESSION_ID"', "'"$DEVICE"'");
+$cart = $A::cart((object) ["items" => [["product_id" => '"$PRODUCT_ID"', "quantity" => 1]]]);
+$total = (new Xophz_Compass_Bazaar_Pricing_Pricer())->price(Xophz_Compass_Bazaar_Pricing_Cart_Request::from_array($cart), $ctx)->total_minor();
+$req = Xophz_Compass_Bazaar_Checkout_Request::from_array(["client_key" => $A::key(), "cart" => $cart, "tenders" => $A::tenders((object) [], $total)]);
+$res = (new Xophz_Compass_Bazaar_Checkout_Service())->submit($req, $ctx);
+echo "sale=" . (int) ($res["body"]["order"]["id"] ?? 0) . "," . $total;' | tail -1)"
+  IFS=',' read -r STAFF_ORDER STAFF_TOTAL <<<"${STAFF_SALE#sale=}"
+  expect_equal 'staff: the session sale was recorded' "$( [[ "${STAFF_ORDER:-}" =~ ^[1-9][0-9]*$ ]] && echo yes || echo "no: $STAFF_SALE" )" 'yes'
+  STAFF_MONEY="$(wp_eval "echo number_format((float) Xophz_Compass_Bazaar_Core_Money::from_minor((int) '$STAFF_TOTAL'), 2);" | tail -1)"
+
+  out="$(run "{\"cashierId\":\"$OTHER_ID\",\"totalOrders\":\"7777\"}" -e CALL_CLASS=Xophz_Compass_Bazaar_Admin_Pos_Shift -e CALL_METHOD=emailShiftSummary -e CALL_MAIL=1 -e CALL_STAFF="$TOKEN" -e CALL_DEVICE="$DEVICE")"
+  expect_equal 'staff email: scoped to the session (its one sale)' "$(sed -n 's/^MAIL_ORDERS //p' <<<"$out")" '1'
+  expect_equal 'staff email: the session gross' "$(sed -n 's/^MAIL_GROSS //p' <<<"$out")" "$STAFF_MONEY"
+  expect_equal 'staff email: sent to the staff member and the operator only' "$(sed -n 's/^MAIL_TO //p' <<<"$out" | tr ',' '\n' | sed 's/.*legacyck\.cashier.*/cashier/;t;s/.*legacyck\.other.*/other/;t;s/.*/operator/' | sort | tr '\n' ' ')" 'cashier operator '
+  out="$(run '{}' -e CALL_CLASS=Xophz_Compass_Bazaar_Admin_Pos_Shift -e CALL_METHOD=emailShiftSummary -e CALL_MAIL=1 -e CALL_STAFF=not-a-token -e CALL_DEVICE="$DEVICE")"
+  expect 'staff email: an invalid session header is refused' "$out" '"code":"staff_session_invalid"'
+  expect_equal 'staff email: nothing is mailed for an invalid header' "$(grep -c '^MAIL_ORDERS' <<<"$out")" '0'
+
+  # A rollback-body sale rung by the cashier, then the cashier's own email.
+  out="$(run "{\"items\":[{\"product_id\":$PRODUCT_ID,\"quantity\":1}],\"paymentMethod\":\"cash\"}" -e CALL_USER="$CASHIER_ID" -e CALL_PIPELINE=legacy)"
+  expect 'rollback: the cashier sells through the old body' "$out" '"success":true'
+  ID="$(order_id_of "$out")"
+  expect_equal 'rollback: the sale has no checkout row' "$(checkout_state "$ID")" 'none'
+  ROLL_MONEY="$(wp_eval "echo number_format((float) Xophz_Compass_Bazaar_Core_Money::from_minor((int) '$STAFF_TOTAL' + Xophz_Compass_Bazaar_Core_Money::to_minor((float) wc_get_order((int) '$ID')->get_total())), 2);" | tail -1)"
+  out="$(run '{}' -e CALL_CLASS=Xophz_Compass_Bazaar_Admin_Pos_Shift -e CALL_METHOD=emailShiftSummary -e CALL_MAIL=1 -e CALL_USER="$CASHIER_ID")"
+  expect_equal 'rollback email: counts the v2 and the rollback sale' "$(sed -n 's/^MAIL_ORDERS //p' <<<"$out")" '2'
+  expect_equal 'rollback email: gross includes the rollback sale' "$(sed -n 's/^MAIL_GROSS //p' <<<"$out")" "$ROLL_MONEY"
+  expect_equal 'rollback email: says rollback sales are included' "$(sed -n 's/^MAIL_LEGACY //p' <<<"$out")" 'yes'
+fi
 
 bz_finish
