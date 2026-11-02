@@ -14,7 +14,9 @@
  *                (multi-rate, single unit, approval, card, legacy with no
  *                payment rows; and for #6995 a cash + card split sale, a
  *                legacy order with a negative discount fee, an order with
- *                taxes rounded at subtotal, an order with no payments for
+ *                taxes rounded at subtotal, one with taxes rounded per line
+ *                (woocommerce_tax_round_at_subtotal 'no', #6995 rework), an
+ *                order with no payments for
  *                an approved cashier refund). Prints "STATE <json>".
  *                Rounding at subtotal is switched on with an in-process
  *                pre_option filter around that order only, so the store's
@@ -241,6 +243,14 @@ function rf_setup( int $admin ): array {
     [ 'product' => $pb, 'qty' => 1, 'total' => '10.00', 'taxes' => [ $r1 => '0.825' ] ],
   ], [ 'provider' => 'cash', 'method_id' => 'cash', 'kind' => 'cash' ], $admin );
   remove_filter( 'pre_option_woocommerce_tax_round_at_subtotal', 'rf_round_at_subtotal' );
+  // Taxes rounded per line (WooCommerce's default, forced 'no' for this process
+  // only): line taxes stay 0.825, the order holds 0.83 + 0.83 = 1.66, total 21.66.
+  add_filter( 'pre_option_woocommerce_tax_round_at_subtotal', 'rf_round_per_line' );
+  $o['roundno'] = rf_order( [
+    [ 'product' => $pb, 'qty' => 1, 'total' => '10.00', 'taxes' => [ $r1 => '0.825' ] ],
+    [ 'product' => $pb, 'qty' => 1, 'total' => '10.00', 'taxes' => [ $r1 => '0.825' ] ],
+  ], [ 'provider' => 'cash', 'method_id' => 'cash', 'kind' => 'cash' ], $admin );
+  remove_filter( 'pre_option_woocommerce_tax_round_at_subtotal', 'rf_round_per_line' );
   // An order with no payment rows that a cashier refunds with an approval.
   $o['nopay'] = rf_order( [ [ 'product' => $pb, 'qty' => 1, 'total' => '10.00', 'taxes' => [ $r1 => '0.83' ] ] ], null, $admin );
   foreach ( $o as $name => $order ) {
@@ -324,6 +334,10 @@ function rf_round_at_subtotal() {
   return 'yes';
 }
 
+function rf_round_per_line() {
+  return 'no';
+}
+
 /**
  * Review fixes of #6995: a split sale refunds cash before the card terminal
  * and names the reference it needs; a legacy negative-fee discount is spread
@@ -378,6 +392,16 @@ function rf_run_review( array $s, int $admin ): void {
   remove_filter( 'pre_option_woocommerce_tax_round_at_subtotal', 'rf_round_at_subtotal' );
   $round = wc_get_order( $O['round'] );
   rf_say( 'round_at_subtotal', implode( ' ', [ $g1['status'], $g1['data']['amount_minor'] ?? '-', $g2['status'] . '/' . ( $g2['data']['amount_minor'] ?? ( $g2['data']['code'] ?? '-' ) ), rf_minor( $round->get_total() ), rf_minor( $round->get_total_refunded() ), (int) rf_capture( $O['round'] )['refunded_minor'] ] ) );
+
+  // Sold rounding per line, refunded while the option says 'yes': the order's
+  // own tax item decides, so each line refunds its 0.83 and nothing is left.
+  add_filter( 'pre_option_woocommerce_tax_round_at_subtotal', 'rf_round_at_subtotal' );
+  $rno = wc_get_order( $O['roundno'] );
+  $h1  = rf_refund( $O['roundno'], [ [ rf_item( $rno, 0 ), 1 ] ] );
+  $h2  = rf_refund( $O['roundno'], [ [ rf_item( $rno, 1 ), 1 ] ] );
+  remove_filter( 'pre_option_woocommerce_tax_round_at_subtotal', 'rf_round_at_subtotal' );
+  $rno = wc_get_order( $O['roundno'] );
+  rf_say( 'round_per_line', implode( ' ', [ $h1['status'], $h1['data']['amount_minor'] ?? '-', $h2['status'] . '/' . ( $h2['data']['amount_minor'] ?? ( $h2['data']['code'] ?? '-' ) ), rf_minor( $rno->get_total() ), rf_minor( $rno->get_total_refunded() ), (int) rf_capture( $O['roundno'] )['refunded_minor'], $rno->get_status() ] ) );
 
   global $wpdb;
   $cashier = (int) $s['cashier'];

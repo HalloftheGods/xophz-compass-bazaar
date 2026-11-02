@@ -20,7 +20,8 @@
 # calling it without an approval is refused (finding of #6983); and the
 # review fixes of #6995: a split cash + card sale refunds cash first and
 # names the card reference it needs, a legacy negative-fee discount is
-# spread over the lines, taxes rounded at subtotal refund to the cent, and
+# spread over the lines, taxes rounded at subtotal or per line (as the
+# order's own tax item shows) refund to the cent, and
 # the approval id is stamped on the refund row.
 #
 # Taxes and ledger mode are switched on inside the wp-cli processes this
@@ -113,6 +114,7 @@ expect_equal 'split sale: a refund the cash leg cannot cover names the card paym
 expect_equal 'split sale: explicit tenders with the slip reference refund both legs' "$(check_line split_tenders)" '200 cash:2000/2000,external_terminal:1248/1248 2'
 expect_equal 'legacy discount fee: each line refunds its discounted price and the two add up to the order total' "$(check_line fee_discount)" '200 4330 330 200/4331 8661 8661'
 expect_equal 'round at subtotal: the last line takes the rate remainder, the order refunds to the cent' "$(check_line round_at_subtotal)" '200 1083 200/1082 2165 2165 2165'
+expect_equal 'round per line (sold with the option no, refunded with yes): each line refunds its 0.83, the order is fully refunded' "$(check_line round_per_line)" '200 1083 200/1083 2166 2166 2166 refunded'
 expect_equal 'approval id: stamped on the refund row of an order with no payments' "$(check_line nopay_approval)" '200 0 stamped'
 expect_equal 'approval id: stamped on the refund row of an order with payments' "$(check_line approved_row)" 'stamped'
 

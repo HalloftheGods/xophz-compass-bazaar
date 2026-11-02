@@ -166,6 +166,79 @@ $part = $T::settle( $sub, $T::compute( $sub, [ [ 'order_item_id' => 1, 'qty' => 
 check( 'settle: a partial refund is held to what the rate has left', $part['lines'][0]['refund_tax'], [ 4 => 50 ] );
 check( 'settle: rates the order does not list are left alone', $T::settle( $sub, $T::compute( $sub, [ [ 'order_item_id' => 1, 'qty' => 1 ] ] ), [], 2165 )['total_minor'], 1083 );
 
+// Per-line rounding (woocommerce_tax_round_at_subtotal 'no', WooCommerce's
+// default): update_taxes() rounds each item's tax on its own and sums them, so
+// two lines of 0.825 make an order tax of 1.66 and each line refunds 0.83.
+$A = 'Xophz_Compass_Bazaar_Refunds_Amounts';
+check( 'round_line: half up by default', [ $A::round_line( '0.825' ), $A::round_line( '-0.825' ), $A::round_line( '0.8249' ), $A::round_line( '' ) ], [ 83, -83, 82, 0 ] );
+check( 'round_line: half down on the magnitude', [ $A::round_line( '0.825', PHP_ROUND_HALF_DOWN ), $A::round_line( '-0.825', PHP_ROUND_HALF_DOWN ), $A::round_line( '0.8251', PHP_ROUND_HALF_DOWN ), $A::round_line( 0.83, PHP_ROUND_HALF_DOWN ) ], [ 82, -82, 83, 83 ] );
+check( 'rate_per_line: an order tax of 1.66 from 0.825 + 0.825 was rounded per line', $A::rate_per_line( '1.66', [ '0.825', '0.825' ], PHP_ROUND_HALF_UP, false ), true );
+check( 'rate_per_line: an order tax of 1.65 was rounded once', $A::rate_per_line( '1.65', [ '0.825', '0.825' ], PHP_ROUND_HALF_UP, true ), false );
+check( 'rate_per_line: a taxable tip counts in the order tax it is matched against', $A::rate_per_line( '2.49', [ '0.825', '0.825', '0.825' ], PHP_ROUND_HALF_UP, false ), true );
+check( 'rate_per_line: no stored tax item falls back to the option', [ $A::rate_per_line( null, [ '0.825' ], PHP_ROUND_HALF_UP, true ), $A::rate_per_line( '', [ '0.825' ], PHP_ROUND_HALF_UP, false ) ], [ true, false ] );
+check( 'rate_limit: per line 83 + 83, once 165', [ $A::rate_limit( [ '0.825', '0.825' ], true ), $A::rate_limit( [ '0.825', '0.825' ], false ) ], [ 166, 165 ] );
+check( 'rate_limit: per line with negative fee tax', $A::rate_limit( [ '4.125', '4.125', '-1.6525' ], true ), 413 + 413 - 165 );
+$pl = $sub;
+$p1 = $T::settle( $pl, $T::compute( $pl, [ [ 'order_item_id' => 1, 'qty' => 1 ] ] ), [ 4 => $A::rate_limit( [ '0.825', '0.825' ], true ) ], 2166 );
+$pl[1]['refunded_qty']         = 1;
+$pl[1]['refunded_total_minor'] = 1000;
+$pl[1]['refunded_taxes_minor'] = [ 4 => 83 ];
+$p2 = $T::settle( $pl, $T::compute( $pl, [ [ 'order_item_id' => 2, 'qty' => 1 ] ] ), [ 4 => 166 - 83 ], 2166 - 1083 );
+check( 'round per line: 2 x 10.00 with 0.825 tax refund 1083 + 1083 = 2166 (was 1083 + 1082)', [ $p1['total_minor'], $p2['total_minor'], $p1['total_minor'] + $p2['total_minor'] ], [ 1083, 1083, 2166 ] );
+
+// Random orders with unrounded line taxes, built as WooCommerce builds the
+// order tax in each rounding setting, refunded in random steps: the refunds
+// add up to the order total exactly and no step is refused.
+mt_srand( 69951 );
+$bad = 0;
+for ( $n = 0; $n < 400; $n++ ) {
+  $per_line = 0 === $n % 2;
+  $mode     = 0 === $n % 3 ? PHP_ROUND_HALF_DOWN : PHP_ROUND_HALF_UP;
+  $eff      = [];
+  $raw_tax  = [];
+  $sum      = 0;
+  for ( $i = 1, $count = mt_rand( 1, 5 ); $i <= $count; $i++ ) {
+    $total     = mt_rand( 1, 20000 );
+    $raw       = Xophz_Compass_Bazaar_Core_Money::from_minor( $total * 825, 6 );
+    $raw_tax[] = $raw;
+    $eff[ $i ] = [ 'qty' => mt_rand( 1, 4 ), 'refunded_qty' => 0, 'total_minor' => $total, 'taxes_minor' => [ 4 => $A::round_line( $raw, $mode ) ], 'refunded_total_minor' => 0, 'refunded_taxes_minor' => [] ];
+    $sum      += $total;
+  }
+  $order_tax = $per_line ? array_sum( array_map( function ( $r ) use ( $A, $mode ) { return $A::round_line( $r, $mode ); }, $raw_tax ) ) : $A::rounded_sum( $raw_tax );
+  $stored    = $per_line ? Xophz_Compass_Bazaar_Core_Money::from_minor( $order_tax, 2 ) : Xophz_Compass_Bazaar_Core_Money::from_minor( array_sum( array_map( function ( $r ) { return Xophz_Compass_Bazaar_Core_Money::to_minor( $r, 6 ); }, $raw_tax ) ), 6 );
+  $limit     = $A::rate_limit( $raw_tax, $A::rate_per_line( $stored, $raw_tax, $mode, ! $per_line ), $mode );
+  if ( $limit !== $order_tax ) {
+    $bad++;
+  }
+  $order_tot = $sum + $order_tax;
+  $refunded  = 0;
+  $guard     = 0;
+  while ( $guard++ < 40 ) {
+    $open = array_keys( array_filter( $eff, function ( $it ) { return $it['qty'] > $it['refunded_qty']; } ) );
+    if ( ! $open ) {
+      break;
+    }
+    $id   = $open[ mt_rand( 0, count( $open ) - 1 ) ];
+    $take = mt_rand( 1, $eff[ $id ]['qty'] - $eff[ $id ]['refunded_qty'] );
+    $done = array_sum( array_map( function ( $it ) { return (int) ( $it['refunded_taxes_minor'][4] ?? 0 ); }, $eff ) );
+    try {
+      $calc = $T::settle( $eff, $T::compute( $eff, [ [ 'order_item_id' => $id, 'qty' => $take ] ] ), [ 4 => $limit - $done ], $order_tot - $refunded );
+    } catch ( Xophz_Compass_Bazaar_Core_Http_Error $e ) {
+      $bad++;
+      break;
+    }
+    $line                                 = $calc['lines'][0];
+    $refunded                            += $calc['total_minor'];
+    $eff[ $id ]['refunded_qty']          += $take;
+    $eff[ $id ]['refunded_total_minor']  += $line['refund_total_minor'];
+    $eff[ $id ]['refunded_taxes_minor'][4] = ( $eff[ $id ]['refunded_taxes_minor'][4] ?? 0 ) + ( $line['refund_tax'][4] ?? 0 );
+  }
+  if ( $refunded !== $order_tot ) {
+    $bad++;
+  }
+}
+check( 'random unrounded taxes: 400 orders, per line and at subtotal, half up and half down, refunded to the cent', $bad, 0 );
+
 // settle(): the order's remaining amount.
 $fail_settle = function ( array $items, array $lines, int $left ) use ( $T ) {
   try {
