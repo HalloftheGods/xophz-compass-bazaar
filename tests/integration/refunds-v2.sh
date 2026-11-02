@@ -17,7 +17,11 @@
 # lifecycle (also when the key is replayed and the hook fires again); the
 # legacy action with stringified items refunds, restocks, keeps its response
 # shape and writes no payment rows for an order with none, and a cashier
-# calling it without an approval is refused (finding of #6983).
+# calling it without an approval is refused (finding of #6983); and the
+# review fixes of #6995: a split cash + card sale refunds cash first and
+# names the card reference it needs, a legacy negative-fee discount is
+# spread over the lines, taxes rounded at subtotal refund to the cent, and
+# the approval id is stamped on the refund row.
 #
 # Taxes and ledger mode are switched on inside the wp-cli processes this
 # script starts; the store's options are not changed, except the tax class
@@ -103,6 +107,14 @@ expect_equal 'terminal: no reference, short tenders, short reference and a cash 
 expect_equal 'terminal: with a reference the refund is recorded on the terminal capture' "$(check_line card_refund)" '200 SLIP-0002 external_terminal SLIP-0002 1881 2165 1'
 expect_equal 'permissions: subscriber 403, logged out 401, unknown order 404, empty body 400' "$(check_line permissions)" '403 401 404/order_not_found 400/invalid_request'
 expect_equal 'ledger: the sale took 3, the refund returns 1 once, a replay and a repeated hook add nothing' "$(check_line ledger_restock)" '1:-3 200 2:-2 200/true 2:-2'
+# Review fixes of #6995.
+expect_equal 'split sale: without tenders the cash leg is refunded before the card leg' "$(check_line split_cash_first)" '200 cash no-error 200 cash 1624'
+expect_equal 'split sale: a refund the cash leg cannot cover names the card payment and the tender it needs' "$(check_line split_needs_reference)" '200 reference_required card-named 1248 tender 422/reference_required'
+expect_equal 'split sale: explicit tenders with the slip reference refund both legs' "$(check_line split_tenders)" '200 cash:2000/2000,external_terminal:1248/1248 2'
+expect_equal 'legacy discount fee: each line refunds its discounted price and the two add up to the order total' "$(check_line fee_discount)" '200 4330 330 200/4331 8661 8661'
+expect_equal 'round at subtotal: the last line takes the rate remainder, the order refunds to the cent' "$(check_line round_at_subtotal)" '200 1083 200/1082 2165 2165 2165'
+expect_equal 'approval id: stamped on the refund row of an order with no payments' "$(check_line nopay_approval)" '200 0 stamped'
+expect_equal 'approval id: stamped on the refund row of an order with payments' "$(check_line approved_row)" 'stamped'
 
 # Two refunds of the last unit at the same moment: exactly one succeeds.
 LAST="$(php -r '$s = json_decode($argv[1], true); echo $s["orders"]["last"];' "$STATE")"

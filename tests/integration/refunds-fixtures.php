@@ -9,10 +9,16 @@
  * 2. Run with eval-file, BZ_ACTION = setup | run | once | parallel_state |
  *    legacy_state | legacy_rest | teardown.
  *    - setup:    tax class bazaar-rf-test with two rates, three private
- *                products, a bazaar_cashier and a subscriber, and five
+ *                products, a bazaar_cashier and a subscriber, and nine
  *                completed orders built from fixed line totals and taxes
  *                (multi-rate, single unit, approval, card, legacy with no
- *                payment rows). Prints "STATE <json>".
+ *                payment rows; and for #6995 a cash + card split sale, a
+ *                legacy order with a negative discount fee, an order with
+ *                taxes rounded at subtotal, an order with no payments for
+ *                an approved cashier refund). Prints "STATE <json>".
+ *                Rounding at subtotal is switched on with an in-process
+ *                pre_option filter around that order only, so the store's
+ *                woocommerce_tax_round_at_subtotal option never changes.
  *    - run:      the REST checks; prints "CHECK <name> <value>".
  *    - once:     one refund of an order's only unit at BZ_AT (parallel check).
  *    - teardown: deletes the orders (also the ledger-owned one the run adds,
@@ -90,8 +96,12 @@ function rf_minor( $amount ): int {
   return Xophz_Compass_Bazaar_Core_Money::to_minor( abs( (float) $amount ) );
 }
 
-/** An order built from fixed line totals and taxes; $payment adds one capture of the whole total. */
-function rf_order( array $lines, ?array $payment, int $admin, array $meta = [] ): WC_Order {
+/**
+ * An order built from fixed line totals and taxes; $payment adds one capture
+ * of the whole total. $fees adds fee lines [{name, total, taxes}] the way the
+ * legacy writer stores a discount (a negative total).
+ */
+function rf_order( array $lines, ?array $payment, int $admin, array $meta = [], array $fees = [] ): WC_Order {
   $order = wc_create_order( [ 'status' => 'pending' ] );
   foreach ( $lines as $l ) {
     $item = new WC_Order_Item_Product();
@@ -101,6 +111,14 @@ function rf_order( array $lines, ?array $payment, int $admin, array $meta = [] )
     $item->set_total( $l['total'] );
     $item->set_taxes( [ 'total' => $l['taxes'], 'subtotal' => $l['taxes'] ] );
     $order->add_item( $item );
+  }
+  foreach ( $fees as $f ) {
+    $fee = new WC_Order_Item_Fee();
+    $fee->set_name( $f['name'] );
+    $fee->set_amount( $f['total'] );
+    $fee->set_total( $f['total'] );
+    $fee->set_taxes( [ 'total' => $f['taxes'] ] );
+    $order->add_item( $fee );
   }
   $order->update_meta_data( '_bazaar_test_run', 'refunds-v2' );
   foreach ( $meta as $k => $v ) {
@@ -202,6 +220,29 @@ function rf_setup( int $admin ): array {
   $o['card']   = rf_order( [ [ 'product' => $pb, 'qty' => 1, 'total' => '20.00', 'taxes' => [ $r1 => '1.65' ] ] ], $card, $admin );
   $o['legacy'] = rf_order( [ [ 'product' => $pa, 'qty' => 2, 'total' => '25.00', 'taxes' => [ $r1 => '2.06' ] ] ], null, $admin );
   wc_reduce_stock_levels( $o['legacy']->get_id() );
+  // Review fixes of #6995 (product B: no managed stock, so no stock moves).
+  // A split sale: cash 20.00 (older) and card 12.48 (newer) for 32.48.
+  $o['split'] = rf_order( [ [ 'product' => $pb, 'qty' => 2, 'total' => '30.00', 'taxes' => [ $r1 => '2.48' ] ] ], null, $admin );
+  foreach ( [ array_merge( $cash, [ 'amount_minor' => 2000 ] ), array_merge( $card, [ 'amount_minor' => 1248, 'reference' => 'SLIP-0003', 'seq' => 2 ] ) ] as $leg ) {
+    Xophz_Compass_Bazaar_Payments_Repository::insert_capture( array_merge( [
+      'order_id' => $o['split']->get_id(), 'status' => 'captured', 'verified' => true, 'currency' => $o['split']->get_currency(),
+      'operator_user_id' => $admin, 'cashier_user_id' => $admin,
+    ], $leg ) );
+  }
+  // A legacy-written order: 2 x 50.00 and a "POS Discount" fee of -20.00 (tax -1.65), total 86.61, no payment rows.
+  $o['fee'] = rf_order( [
+    [ 'product' => $pb, 'qty' => 1, 'total' => '50.00', 'taxes' => [ $r1 => '4.13' ] ],
+    [ 'product' => $pb, 'qty' => 1, 'total' => '50.00', 'taxes' => [ $r1 => '4.13' ] ],
+  ], null, $admin, [], [ [ 'name' => 'POS Discount', 'total' => '-20.00', 'taxes' => [ $r1 => '-1.65' ] ] ] );
+  // Taxes rounded at subtotal (this process only): line taxes stay 0.825, the order holds 1.65.
+  add_filter( 'pre_option_woocommerce_tax_round_at_subtotal', 'rf_round_at_subtotal' );
+  $o['round'] = rf_order( [
+    [ 'product' => $pb, 'qty' => 1, 'total' => '10.00', 'taxes' => [ $r1 => '0.825' ] ],
+    [ 'product' => $pb, 'qty' => 1, 'total' => '10.00', 'taxes' => [ $r1 => '0.825' ] ],
+  ], [ 'provider' => 'cash', 'method_id' => 'cash', 'kind' => 'cash' ], $admin );
+  remove_filter( 'pre_option_woocommerce_tax_round_at_subtotal', 'rf_round_at_subtotal' );
+  // An order with no payment rows that a cashier refunds with an approval.
+  $o['nopay'] = rf_order( [ [ 'product' => $pb, 'qty' => 1, 'total' => '10.00', 'taxes' => [ $r1 => '0.83' ] ] ], null, $admin );
   foreach ( $o as $name => $order ) {
     $state['orders'][ $name ] = $order->get_id();
   }
@@ -277,6 +318,78 @@ function rf_teardown( array $s ): void {
   }
   WC_Tax::delete_tax_class_by( 'slug', 'bazaar-rf-test' );
   rf_say( 'teardown', 'done' );
+}
+
+function rf_round_at_subtotal() {
+  return 'yes';
+}
+
+/**
+ * Review fixes of #6995: a split sale refunds cash before the card terminal
+ * and names the reference it needs; a legacy negative-fee discount is spread
+ * over the lines; taxes rounded at subtotal refund to the cent; the approval
+ * id is stamped on the refund row of an order with no payments.
+ */
+function rf_run_review( array $s, int $admin ): void {
+  $O = $s['orders'];
+
+  $split = wc_get_order( $O['split'] );
+  $is    = rf_item( $split );
+  $d1    = rf_refund( $O['split'], [ [ $is, 1 ] ], [ 'dry_run' => true ] );
+  $r1    = rf_refund( $O['split'], [ [ $is, 1 ] ] );
+  rf_say( 'split_cash_first', implode( ' ', [
+    $d1['status'], implode( ',', array_column( $d1['data']['allocations'] ?? [], 'kind' ) ) ?: '-', isset( $d1['data']['allocation_error'] ) ? 'error' : 'no-error',
+    $r1['status'], implode( ',', array_column( $r1['data']['allocations'] ?? [], 'kind' ) ) ?: '-', $r1['data']['amount_minor'] ?? '-',
+  ] ) );
+  $card_uuid = '';
+  foreach ( Xophz_Compass_Bazaar_Payments_Repository::for_order( $O['split'], 'capture' ) as $c ) {
+    if ( 'external_terminal' === $c->kind ) {
+      $card_uuid = (string) $c->payment_uuid;
+    }
+  }
+  $d2  = rf_refund( $O['split'], [ [ $is, 1 ] ], [ 'dry_run' => true ] );
+  $err = $d2['data']['allocation_error'] ?? [];
+  $r2  = rf_refund( $O['split'], [ [ $is, 1 ] ] );
+  rf_say( 'split_needs_reference', implode( ' ', [
+    $d2['status'], $err['code'] ?? '-', ( $err['data']['payment_uuid'] ?? '' ) === $card_uuid ? 'card-named' : 'card-not-named', $err['data']['amount_minor'] ?? '-',
+    ( $err['data']['tender']['payment_uuid'] ?? '' ) === $card_uuid ? 'tender' : 'no-tender', $r2['status'] . '/' . ( $r2['data']['code'] ?? '-' ),
+  ] ) );
+  $r3 = rf_refund( $O['split'], [ [ $is, 1 ] ], [ 'tenders' => [
+    [ 'method_id' => 'cash', 'amount_minor' => 376 ],
+    [ 'payment_uuid' => $card_uuid, 'amount_minor' => 1248, 'reference' => 'SLIP-0004' ],
+  ] ] );
+  $caps = [];
+  foreach ( Xophz_Compass_Bazaar_Payments_Repository::for_order( $O['split'], 'capture' ) as $c ) {
+    $caps[] = $c->kind . ':' . $c->refunded_minor . '/' . $c->amount_minor;
+  }
+  sort( $caps );
+  rf_say( 'split_tenders', implode( ' ', [ $r3['status'], implode( ',', $caps ), rf_wc_refunds( $O['split'] ) ] ) );
+
+  $fee = wc_get_order( $O['fee'] );
+  $f1  = rf_refund( $O['fee'], [ [ rf_item( $fee, 0 ), 1 ] ] );
+  $f2  = rf_refund( $O['fee'], [ [ rf_item( $fee, 1 ), 1 ] ] );
+  $fee = wc_get_order( $O['fee'] );
+  rf_say( 'fee_discount', implode( ' ', [ $f1['status'], $f1['data']['amount_minor'] ?? '-', $f1['data']['tax_minor'] ?? '-', $f2['status'] . '/' . ( $f2['data']['amount_minor'] ?? ( $f2['data']['code'] ?? '-' ) ), rf_minor( $fee->get_total() ), rf_minor( $fee->get_total_refunded() ) ] ) );
+
+  add_filter( 'pre_option_woocommerce_tax_round_at_subtotal', 'rf_round_at_subtotal' );
+  $round = wc_get_order( $O['round'] );
+  $g1    = rf_refund( $O['round'], [ [ rf_item( $round, 0 ), 1 ] ] );
+  $g2    = rf_refund( $O['round'], [ [ rf_item( $round, 1 ), 1 ] ] );
+  remove_filter( 'pre_option_woocommerce_tax_round_at_subtotal', 'rf_round_at_subtotal' );
+  $round = wc_get_order( $O['round'] );
+  rf_say( 'round_at_subtotal', implode( ' ', [ $g1['status'], $g1['data']['amount_minor'] ?? '-', $g2['status'] . '/' . ( $g2['data']['amount_minor'] ?? ( $g2['data']['code'] ?? '-' ) ), rf_minor( $round->get_total() ), rf_minor( $round->get_total_refunded() ), (int) rf_capture( $O['round'] )['refunded_minor'] ] ) );
+
+  global $wpdb;
+  $cashier = (int) $s['cashier'];
+  $in      = rf_item( wc_get_order( $O['nopay'] ) );
+  $need    = rf_refund( $O['nopay'], [ [ $in, 1 ] ], [ 'dry_run' => true ], $cashier )['data']['approvals_needed'][0] ?? [];
+  $tok     = rf_approval( $cashier, $admin, 'refund', $need['subject_hash'] ?? '', (int) ( $need['amount_minor'] ?? 0 ) );
+  $ok      = rf_refund( $O['nopay'], [ [ $in, 1 ] ], [ 'approval_token' => $tok ], $cashier );
+  $app_id  = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . rf_tbl( 'approvals' ) . ' WHERE token_hash = %s', Xophz_Compass_Bazaar_Staff_Approvals::hash_token( $tok ) ) );
+  $rows    = rf_rows( $O['nopay'] );
+  rf_say( 'nopay_approval', implode( ' ', [ $ok['status'], count( Xophz_Compass_Bazaar_Payments_Repository::for_order( $O['nopay'], 'refund' ) ), $app_id > 0 && (int) ( $rows[0]['approval_id'] ?? 0 ) === $app_id ? 'stamped' : 'not-stamped:' . ( $rows[0]['approval_id'] ?? 'null' ) ] ) );
+  $app_rows = rf_rows( $O['app'] );
+  rf_say( 'approved_row', ! empty( $app_rows[0]['approval_id'] ) ? 'stamped' : 'not-stamped' );
 }
 
 /** The refunded tax of one rate and the refunded total of an item, in minor units. */
@@ -412,6 +525,7 @@ switch ( getenv( 'BZ_ACTION' ) ) {
     rf_run_approvals( $bz_state, $bz_admin );
     rf_run_rest( $bz_state, $bz_admin );
     rf_run_ledger( $bz_state, $bz_admin );
+    rf_run_review( $bz_state, $bz_admin );
     break;
 
   case 'once':

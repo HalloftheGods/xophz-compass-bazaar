@@ -11,14 +11,18 @@
  *    stored error.
  * 3. Take GET_LOCK('bazaar_order_{id}', 5). Not obtained: 409 order_busy.
  * 4. Read refundable quantities from WooCommerce and compute amounts with
- *    Refunds_Tax.
+ *    Refunds_Amounts: negative fee lines (legacy order discounts) are spread
+ *    over the lines, and each tax rate and the whole refund are held to what
+ *    the order still has (Refunds_Tax::settle).
  * 5. Limits: Staff_Limits decides whether a scope=refund approval is needed.
  *    Subject: Refunds_Request::subject_for(). A missing or wrong token is 403
  *    approval_required or approval_invalid.
- * 6. One Core_Db::tx: consume the approval, allocate_refund on the chosen
- *    captures (newest first unless the request names tenders) and write the
- *    refund payment rows. Each row copies its capture's provider, method and
- *    kind (cash goes back as cash); the provider's refund() decides whether a
+ * 6. One Core_Db::tx: consume the approval and stamp its id on the refund
+ *    row, allocate_refund on the captures Refunds_Allocation chose (the
+ *    request's tenders, or else captures needing no slip reference before
+ *    external terminal ones, newest first within each) and write the refund
+ *    payment rows. Each row copies its capture's provider, method and kind
+ *    (cash goes back as cash); the provider's refund() decides whether a
  *    reference is needed (an external terminal needs one).
  * 7. wc_create_refund with refund_payment false and restock_items = restock.
  *    Ledger-owned orders restock through Stock_Order_Lifecycle on
@@ -39,7 +43,8 @@
  * - A spent approval is not given back when WooCommerce then refuses.
  * - Orders with no recorded payments (not sold through checkout v2) refund in
  *   WooCommerce only; no payment rows are written for them.
- * - Shipping and fee lines are not refunded.
+ * - Shipping and positive fee lines (tips) are not refunded; negative fee
+ *   lines are refunded only as their share of each line.
  *
  * @package Xophz_Compass_Bazaar
  */
@@ -125,7 +130,7 @@ class Xophz_Compass_Bazaar_Refunds_Service {
       $calc  = $this->amounts( $order, $req );
       $needs = $this->approvals( $req, $ctx, $calc['total_minor'] );
       $this->verify_approvals( $needs, $req, $ctx );
-      $plan = $this->allocation_plan( $order, $req, $calc['total_minor'] );
+      $plan = Xophz_Compass_Bazaar_Refunds_Allocation::plan( (int) $order->get_id(), $req, $calc['total_minor'] );
       Xophz_Compass_Bazaar_Refunds_Repository::set_amounts( (int) $row->id, $calc['total_minor'], $calc['tax_minor'] );
       $rows = $this->commit_allocations( $row, $req, $ctx, $needs, $plan );
     } catch ( Xophz_Compass_Bazaar_Core_Http_Error $e ) {
@@ -180,7 +185,7 @@ class Xophz_Compass_Bazaar_Refunds_Service {
       'lines' => $calc['lines'], 'approvals_needed' => $this->approvals( $req, $ctx, $calc['total_minor'] ),
     ];
     try {
-      $body['allocations'] = self::allocation_view( $this->allocation_plan( $order, $req, $calc['total_minor'] ) );
+      $body['allocations'] = Xophz_Compass_Bazaar_Refunds_Allocation::view( Xophz_Compass_Bazaar_Refunds_Allocation::plan( (int) $order->get_id(), $req, $calc['total_minor'] ) );
     } catch ( Xophz_Compass_Bazaar_Core_Http_Error $e ) {
       $body['allocations']      = [];
       $body['allocation_error'] = self::error_body( $e );
@@ -200,31 +205,12 @@ class Xophz_Compass_Bazaar_Refunds_Service {
     return $order;
   }
 
-  /** @return array Refunds_Tax::compute() output. @throws Xophz_Compass_Bazaar_Core_Http_Error 422 invalid_line, refund_empty. */
+  /**
+   * @return array Refunds_Tax::compute() output, after negative fees are spread and the order limits settled.
+   * @throws Xophz_Compass_Bazaar_Core_Http_Error 422 invalid_line, refund_empty, refund_exceeds_order.
+   */
   private function amounts( WC_Order $order, Xophz_Compass_Bazaar_Refunds_Request $req ): array {
-    $items = [];
-    foreach ( $order->get_items() as $item_id => $item ) {
-      $taxes = (array) ( $item->get_taxes()['total'] ?? [] );
-      $rates = [];
-      $done  = [];
-      foreach ( $taxes as $rate_id => $amount ) {
-        $rates[ $rate_id ] = '' === (string) $amount ? 0 : Xophz_Compass_Bazaar_Core_Money::to_minor( (string) $amount );
-        $done[ $rate_id ]  = Xophz_Compass_Bazaar_Core_Money::to_minor( abs( (float) $order->get_tax_refunded_for_item( $item_id, $rate_id ) ) );
-      }
-      $items[ (int) $item_id ] = [
-        'qty'                  => (int) $item->get_quantity(),
-        'refunded_qty'         => absint( $order->get_qty_refunded_for_item( $item_id ) ),
-        'total_minor'          => Xophz_Compass_Bazaar_Core_Money::to_minor( (string) $item->get_total() ),
-        'taxes_minor'          => $rates,
-        'refunded_total_minor' => Xophz_Compass_Bazaar_Core_Money::to_minor( abs( (float) $order->get_total_refunded_for_item( $item_id ) ) ),
-        'refunded_taxes_minor' => $done,
-      ];
-    }
-    $calc = Xophz_Compass_Bazaar_Refunds_Tax::compute( $items, $req->lines );
-    if ( $calc['total_minor'] <= 0 ) {
-      throw new Xophz_Compass_Bazaar_Core_Http_Error( 'refund_empty', 'These lines add up to nothing to refund.', 422 );
-    }
-    return $calc;
+    return Xophz_Compass_Bazaar_Refunds_Amounts::for_lines( $order, $req->lines );
   }
 
   /**
@@ -251,89 +237,9 @@ class Xophz_Compass_Bazaar_Refunds_Service {
   }
 
   /**
-   * Where the money goes back. Each entry: capture (row), amount_minor,
-   * reference, result (the provider's refund() answer). Empty for an order
-   * with no recorded captures.
-   *
-   * @return array[]
-   * @throws Xophz_Compass_Bazaar_Core_Http_Error 422 tender_unsupported, tender_total_mismatch, refund_exceeds_payments, or a provider refusal such as reference_required.
-   */
-  private function allocation_plan( WC_Order $order, Xophz_Compass_Bazaar_Refunds_Request $req, int $total ): array {
-    $all = Xophz_Compass_Bazaar_Payments_Repository::for_order( (int) $order->get_id(), 'capture' );
-    if ( ! $all ) {
-      if ( $req->tenders ) {
-        throw new Xophz_Compass_Bazaar_Core_Http_Error( 'tender_unsupported', 'This order has no recorded payments to refund to.', 422 );
-      }
-      return [];
-    }
-    $left     = [];
-    $captures = [];
-    foreach ( $all as $capture ) {
-      $room = (int) $capture->amount_minor - (int) $capture->refunded_minor;
-      if ( 'captured' === $capture->status && $room > 0 ) {
-        $left[ (int) $capture->id ] = $room;
-        $captures[]                 = $capture;
-      }
-    }
-    $plan = [];
-    $take = function ( array $pool, int $amount, string $reference, int $index ) use ( &$plan, &$left ) {
-      foreach ( $pool as $capture ) {
-        $id   = (int) $capture->id;
-        $part = min( $amount, $left[ $id ] ?? 0 );
-        if ( $part <= 0 ) {
-          continue;
-        }
-        $left[ $id ] -= $part;
-        $amount      -= $part;
-        if ( isset( $plan[ $id ] ) ) {
-          $plan[ $id ]['amount_minor'] += $part;
-          $plan[ $id ]['reference']     = '' !== $plan[ $id ]['reference'] ? $plan[ $id ]['reference'] : $reference;
-        } else {
-          $plan[ $id ] = [ 'capture' => $capture, 'amount_minor' => $part, 'reference' => $reference ];
-        }
-        if ( 0 === $amount ) {
-          break;
-        }
-      }
-      if ( $amount > 0 ) {
-        throw new Xophz_Compass_Bazaar_Core_Http_Error( 'refund_exceeds_payments', 'The payments chosen cannot be refunded by this much.', 422, [ 'tender' => $index, 'short_minor' => $amount ] );
-      }
-    };
-    if ( $req->tenders ) {
-      $sum = array_sum( array_column( $req->tenders, 'amount_minor' ) );
-      if ( $sum !== $total ) {
-        throw new Xophz_Compass_Bazaar_Core_Http_Error( 'tender_total_mismatch', 'The tenders add up to ' . $sum . ', not the refund of ' . $total . '.', 422, [ 'refund_minor' => $total, 'tender_minor' => $sum ] );
-      }
-      foreach ( $req->tenders as $i => $tender ) {
-        $pool = array_values( array_filter( $captures, function ( $capture ) use ( $tender ) {
-          return '' !== $tender['payment_uuid'] ? $capture->payment_uuid === $tender['payment_uuid'] : $capture->method_id === $tender['method_id'];
-        } ) );
-        if ( ! $pool ) {
-          throw new Xophz_Compass_Bazaar_Core_Http_Error( 'tender_unsupported', 'No payment of this order with room left matches this tender.', 422, [ 'tender' => $i ] );
-        }
-        $take( $pool, (int) $tender['amount_minor'], (string) $tender['reference'], $i );
-      }
-    } else {
-      $take( $captures, $total, '', 0 );
-    }
-    $providers = Xophz_Compass_Bazaar_Payments_Registry::providers();
-    foreach ( $plan as $id => $entry ) {
-      $capture  = $entry['capture'];
-      $provider = $providers[ (string) $capture->provider ] ?? null;
-      if ( null === $provider ) {
-        throw new Xophz_Compass_Bazaar_Core_Http_Error( 'tender_unsupported', 'No payment provider "' . $capture->provider . '" is available to refund this payment.', 422, [ 'payment_uuid' => (string) $capture->payment_uuid ] );
-      }
-      $result = $provider->refund( (array) $capture, $entry['amount_minor'], [ 'reference' => $entry['reference'] ] );
-      if ( $result->is_refused() ) {
-        throw new Xophz_Compass_Bazaar_Core_Http_Error( $result->code, $result->message, $result->http_status, [ 'payment_uuid' => (string) $capture->payment_uuid ] );
-      }
-      $plan[ $id ]['result'] = $result;
-    }
-    return array_values( $plan );
-  }
-
-  /**
-   * Step 6: spend the approval, take the capacity and write the refund rows.
+   * Step 6: spend the approval, stamp it on the refund row, take the capacity
+   * and write the refund rows. The stamp is written also for an order with no
+   * recorded payments, where no payment row carries it (section 13.4).
    *
    * @return int[] Payment row ids, in plan order.
    */
@@ -342,6 +248,9 @@ class Xophz_Compass_Bazaar_Refunds_Service {
       $approval_id = null;
       foreach ( $needs as $need ) {
         $approval_id = Xophz_Compass_Bazaar_Staff_Approvals::consume( $req->approval_token, (string) $need['scope'], (string) $need['subject_hash'], (int) $need['amount_minor'], $ctx->acting_user_id, 'refund:' . (int) $row->id );
+      }
+      if ( null !== $approval_id ) {
+        Xophz_Compass_Bazaar_Refunds_Repository::set_approval( (int) $row->id, (int) $approval_id );
       }
       $ids = [];
       foreach ( $plan as $seq => $entry ) {
@@ -443,23 +352,8 @@ class Xophz_Compass_Bazaar_Refunds_Service {
       'restock'        => $req->restock,
       'reason'         => $req->reason,
       'lines'          => $calc['lines'],
-      'allocations'    => self::allocation_view( $plan ),
+      'allocations'    => Xophz_Compass_Bazaar_Refunds_Allocation::view( $plan ),
     ];
-  }
-
-  private static function allocation_view( array $plan ): array {
-    $out = [];
-    foreach ( $plan as $entry ) {
-      $capture = $entry['capture'];
-      $out[]   = [
-        'payment_uuid' => (string) $capture->payment_uuid,
-        'method_id'    => (string) $capture->method_id,
-        'kind'         => (string) $capture->kind,
-        'amount_minor' => (int) $entry['amount_minor'],
-        'reference'    => isset( $entry['result'] ) && '' !== $entry['result']->reference ? $entry['result']->reference : (string) $entry['reference'],
-      ];
-    }
-    return $out;
   }
 
   /** The stored form of an error: replayed by answer(). */

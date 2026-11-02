@@ -15,10 +15,27 @@
  * The line total and every tax rate id of the item follow the same rule; the
  * old handler refunded only the first rate.
  *
+ * Two adjustments around compute():
+ * - spread_fees(): an order discount stored as a negative fee line (the legacy
+ *   writer's "POS Discount" and custom discounts) is spread over the line
+ *   items before compute(), the fee total by line total and each rate's fee
+ *   tax by that rate's line tax, largest remainder (Core_Money::allocate). A
+ *   refunded line then gives back what it cost after the discount.
+ * - settle(): after compute(), each tax rate's refund is held to what the
+ *   order still has of that rate, and a refund that leaves no unit of any
+ *   item carrying the rate takes exactly that remainder (the per-rate form of
+ *   the last-unit rule, for line taxes stored unrounded when WooCommerce
+ *   rounds at subtotal). The whole refund is then held to the order's
+ *   remaining refundable amount: a refund that completes the order takes the
+ *   remainder, cut from line totals last line first and then from tax; any
+ *   other refund above it is 422 refund_exceeds_order.
+ *
  * Guaranteed: an amount of 0 or above is never refunded above what remains
- * (amount - R). Not guaranteed: intermediate products (amount * q * 2) must fit
- * in a PHP integer, which holds for amounts below about 10^13 minor units and
- * quantities below 10^5. This class reads no order and writes nothing.
+ * (amount - R), and after settle() a refund never exceeds the order's
+ * remaining amount. Not guaranteed: intermediate products (amount * q * 2)
+ * must fit in a PHP integer, which holds for amounts below about 10^13 minor
+ * units and quantities below 10^5. This class reads no order and writes
+ * nothing.
  *
  * @package Xophz_Compass_Bazaar
  */
@@ -99,6 +116,141 @@ class Xophz_Compass_Bazaar_Refunds_Tax {
       $tax      += $line_tax;
     }
     return [ 'lines' => $out, 'subtotal_minor' => $subtotal, 'tax_minor' => $tax, 'total_minor' => $subtotal + $tax ];
+  }
+
+  /**
+   * Spread negative fee lines over the line items (see the class comment).
+   * Positive fees are not spread: fee lines are not refunded.
+   *
+   * @param array $items compute()'s items.
+   * @param array $fees  [{total_minor (below 0), taxes_minor: rate id => minor}].
+   * @return array The items with total_minor and taxes_minor lowered by their shares.
+   */
+  public static function spread_fees( array $items, array $fees ): array {
+    $ids = array_keys( $items );
+    foreach ( $fees as $fee ) {
+      $total = (int) ( $fee['total_minor'] ?? 0 );
+      if ( $total >= 0 || ! $ids ) {
+        continue;
+      }
+      $by_total = array_map( function ( $id ) use ( $items ) {
+        return max( 0, (int) $items[ $id ]['total_minor'] );
+      }, $ids );
+      if ( array_sum( $by_total ) <= 0 ) {
+        continue;
+      }
+      $total = max( $total, -array_sum( $by_total ) );
+      foreach ( Xophz_Compass_Bazaar_Core_Money::allocate( $total, $by_total ) as $k => $share ) {
+        $items[ $ids[ $k ] ]['total_minor'] = (int) $items[ $ids[ $k ] ]['total_minor'] + $share;
+      }
+      foreach ( (array) ( $fee['taxes_minor'] ?? [] ) as $rate_id => $fee_tax ) {
+        $fee_tax = (int) $fee_tax;
+        if ( 0 === $fee_tax ) {
+          continue;
+        }
+        $by_rate = array_map( function ( $id ) use ( $items, $rate_id ) {
+          return max( 0, (int) ( $items[ $id ]['taxes_minor'][ $rate_id ] ?? 0 ) );
+        }, $ids );
+        $weights = array_sum( $by_rate ) > 0 ? $by_rate : $by_total;
+        if ( $fee_tax < 0 && array_sum( $by_rate ) > 0 ) {
+          $fee_tax = max( $fee_tax, -array_sum( $by_rate ) );
+        }
+        foreach ( Xophz_Compass_Bazaar_Core_Money::allocate( $fee_tax, $weights ) as $k => $share ) {
+          if ( 0 !== $share ) {
+            $items[ $ids[ $k ] ]['taxes_minor'][ $rate_id ] = (int) ( $items[ $ids[ $k ] ]['taxes_minor'][ $rate_id ] ?? 0 ) + $share;
+          }
+        }
+      }
+    }
+    return $items;
+  }
+
+  /**
+   * Hold compute()'s result to the order's per-rate and total limits (see the
+   * class comment).
+   *
+   * @param array $items     The items compute() ran on.
+   * @param array $calc      compute()'s output.
+   * @param array $rate_left Rate id => tax of that rate the order's line items
+   *                         still hold (their tax summed and rounded once, less
+   *                         what was refunded). Rates not listed are left alone.
+   * @param int   $order_left The order's remaining refundable amount.
+   * @return array compute()'s shape.
+   * @throws Xophz_Compass_Bazaar_Core_Http_Error 422 refund_exceeds_order.
+   */
+  public static function settle( array $items, array $calc, array $rate_left, int $order_left ): array {
+    $taking = [];
+    foreach ( $calc['lines'] as $line ) {
+      $taking[ $line['order_item_id'] ] = ( $taking[ $line['order_item_id'] ] ?? 0 ) + (int) $line['qty'];
+    }
+    $after = [];
+    foreach ( $items as $id => $item ) {
+      $after[ $id ] = (int) $item['qty'] - (int) ( $item['refunded_qty'] ?? 0 ) - ( $taking[ $id ] ?? 0 );
+    }
+    $lines = $calc['lines'];
+    foreach ( $rate_left as $rate_id => $left ) {
+      $carriers = array_filter( array_keys( $items ), function ( $id ) use ( $items, $rate_id ) {
+        return 0 !== (int) ( $items[ $id ]['taxes_minor'][ $rate_id ] ?? 0 );
+      } );
+      $mine = array_keys( array_filter( $lines, function ( $line ) use ( $carriers ) {
+        return in_array( $line['order_item_id'], $carriers, true );
+      } ) );
+      if ( ! $mine ) {
+        continue;
+      }
+      $current  = array_sum( array_map( function ( $k ) use ( $lines, $rate_id ) {
+        return (int) ( $lines[ $k ]['refund_tax'][ $rate_id ] ?? 0 );
+      }, $mine ) );
+      $complete = ! array_filter( $carriers, function ( $id ) use ( $after ) {
+        return $after[ $id ] > 0;
+      } );
+      $target   = $complete ? max( 0, (int) $left ) : min( $current, max( 0, (int) $left ) );
+      $delta    = $target - $current;
+      for ( $n = count( $mine ) - 1; $n >= 0 && 0 !== $delta; $n-- ) {
+        $k    = $mine[ $n ];
+        $have = (int) ( $lines[ $k ]['refund_tax'][ $rate_id ] ?? 0 );
+        $move = $delta > 0 ? $delta : max( $delta, -$have );
+        $lines[ $k ]['refund_tax'][ $rate_id ] = $have + $move;
+        $delta -= $move;
+      }
+    }
+    $calc = self::totals( $lines );
+    $over = $calc['total_minor'] - max( 0, $order_left );
+    if ( $over <= 0 ) {
+      return $calc;
+    }
+    if ( array_filter( $after, function ( $q ) { return $q > 0; } ) ) {
+      throw new Xophz_Compass_Bazaar_Core_Http_Error( 'refund_exceeds_order', 'This refund is more than the order still has to refund.', 422, [ 'refund_minor' => $calc['total_minor'], 'remaining_minor' => max( 0, $order_left ) ] );
+    }
+    for ( $k = count( $lines ) - 1; $k >= 0 && $over > 0; $k-- ) {
+      $cut = min( $over, max( 0, (int) $lines[ $k ]['refund_total_minor'] ) );
+      $lines[ $k ]['refund_total_minor'] -= $cut;
+      $over -= $cut;
+    }
+    for ( $k = count( $lines ) - 1; $k >= 0 && $over > 0; $k-- ) {
+      foreach ( array_reverse( array_keys( $lines[ $k ]['refund_tax'] ), true ) as $rate_id ) {
+        $cut = min( $over, max( 0, (int) $lines[ $k ]['refund_tax'][ $rate_id ] ) );
+        $lines[ $k ]['refund_tax'][ $rate_id ] -= $cut;
+        $over -= $cut;
+      }
+    }
+    return self::totals( $lines );
+  }
+
+  /** compute()'s shape from lines whose amounts changed; zero rates are dropped. */
+  private static function totals( array $lines ): array {
+    $subtotal = 0;
+    $tax      = 0;
+    foreach ( $lines as $k => $line ) {
+      $rates = array_filter( (array) $line['refund_tax'], function ( $minor ) {
+        return 0 !== (int) $minor;
+      } );
+      $lines[ $k ]['refund_tax']       = $rates;
+      $lines[ $k ]['refund_tax_minor'] = array_sum( $rates );
+      $subtotal                       += (int) $line['refund_total_minor'];
+      $tax                            += $lines[ $k ]['refund_tax_minor'];
+    }
+    return [ 'lines' => array_values( $lines ), 'subtotal_minor' => $subtotal, 'tax_minor' => $tax, 'total_minor' => $subtotal + $tax ];
   }
 
   private static function invalid( int $order_item_id, string $message, array $data = [] ): Xophz_Compass_Bazaar_Core_Http_Error {

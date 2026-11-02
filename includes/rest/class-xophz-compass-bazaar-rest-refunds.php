@@ -16,7 +16,8 @@
  *                             refund_interrupted or refund_conflict, 422
  *                             idempotency_key_reused, invalid_line,
  *                             tender_total_mismatch, tender_unsupported,
- *                             reference_required, refund_exceeds_payments or
+ *                             reference_required, refund_exceeds_payments,
+ *                             refund_exceeds_order, refund_empty or
  *                             refund_rejected.
  *
  * Refunds_Service decides everything else; this class only parses and maps.

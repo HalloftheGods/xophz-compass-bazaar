@@ -2,11 +2,16 @@
 /**
  * Refunds_Tax: half-up proration, the last unit taking the remainder, every
  * tax rate of a line, and exact sums over random partial-refund sequences.
+ * Review fixes of #6995: negative fee lines spread over the lines (legacy
+ * order discounts), per-rate settlement for line taxes stored unrounded
+ * (WooCommerce rounding at subtotal) and the order's remaining amount.
  */
 require_once dirname( __DIR__ ) . '/support/harness.php';
 $plugin = dirname( dirname( __DIR__ ) );
 require_once $plugin . '/includes/core/class-xophz-compass-bazaar-core-http-error.php';
+require_once $plugin . '/includes/core/class-xophz-compass-bazaar-core-money.php';
 require_once $plugin . '/includes/refunds/class-xophz-compass-bazaar-refunds-tax.php';
+require_once $plugin . '/includes/refunds/class-xophz-compass-bazaar-refunds-amounts.php';
 
 $T = 'Xophz_Compass_Bazaar_Refunds_Tax';
 
@@ -99,3 +104,131 @@ check( 'refusal: unknown item', $fail( $items, [ [ 'order_item_id' => 9, 'qty' =
 check( 'refusal: more than the item holds', $fail( $items, [ [ 'order_item_id' => 2, 'qty' => 2 ] ] ), [ 'invalid_line', 422, 2 ] );
 $items[2]['refunded_qty'] = 1;
 check( 'refusal: nothing left to refund', $fail( $items, [ [ 'order_item_id' => 2, 'qty' => 1 ] ] ), [ 'invalid_line', 422, 2 ] );
+
+// spread_fees(): the finding's legacy order. 2 x 50.00 (8.25% tax 4.13 each),
+// "POS Discount" -20.00 with -1.65 tax; the order total is 86.61.
+$legacy = [
+  1 => [ 'qty' => 1, 'refunded_qty' => 0, 'total_minor' => 5000, 'taxes_minor' => [ 4 => 413 ], 'refunded_total_minor' => 0, 'refunded_taxes_minor' => [] ],
+  2 => [ 'qty' => 1, 'refunded_qty' => 0, 'total_minor' => 5000, 'taxes_minor' => [ 4 => 413 ], 'refunded_total_minor' => 0, 'refunded_taxes_minor' => [] ],
+];
+$discount = [ [ 'total_minor' => -2000, 'taxes_minor' => [ 4 => -165 ] ] ];
+$spread   = $T::spread_fees( $legacy, $discount );
+check( 'spread: the discount comes off each line by line total', [ $spread[1]['total_minor'], $spread[2]['total_minor'] ], [ 4000, 4000 ] );
+check( 'spread: the discount tax by line tax, largest remainder (tie to the first)', [ $spread[1]['taxes_minor'], $spread[2]['taxes_minor'] ], [ [ 4 => 330 ], [ 4 => 331 ] ] );
+check( 'spread: a positive fee (tip) is not spread', $T::spread_fees( $legacy, [ [ 'total_minor' => 500, 'taxes_minor' => [ 4 => 41 ] ] ] ), $legacy );
+check( 'spread: no fees, items unchanged', $T::spread_fees( $legacy, [] ), $legacy );
+
+$rate_left = [ 4 => Xophz_Compass_Bazaar_Refunds_Amounts::rounded_sum( [ '4.13', '4.13', '-1.65' ] ) ];
+check( 'rounded_sum: line and fee taxes', $rate_left[4], 661 );
+$a = $T::settle( $spread, $T::compute( $spread, [ [ 'order_item_id' => 1, 'qty' => 1 ] ] ), $rate_left, 8661 );
+check( 'legacy discount: item A refunds its discounted price, not 54.13', [ $a['subtotal_minor'], $a['tax_minor'], $a['total_minor'] ], [ 4000, 330, 4330 ] );
+$spread[1]['refunded_qty']         = 1;
+$spread[1]['refunded_total_minor'] = 4000;
+$spread[1]['refunded_taxes_minor'] = [ 4 => 330 ];
+$b = $T::settle( $spread, $T::compute( $spread, [ [ 'order_item_id' => 2, 'qty' => 1 ] ] ), [ 4 => 661 - 330 ], 8661 - 4330 );
+check( 'legacy discount: item B refunds the rest exactly (was refund_rejected)', $b['total_minor'], 4331 );
+check( 'legacy discount: A + B equals the order total', $a['total_minor'] + $b['total_minor'], 8661 );
+
+// A fee taxed at a rate only one line carries stays on that line.
+$mixed = [
+  1 => [ 'qty' => 1, 'refunded_qty' => 0, 'total_minor' => 1000, 'taxes_minor' => [ 4 => 100 ], 'refunded_total_minor' => 0, 'refunded_taxes_minor' => [] ],
+  2 => [ 'qty' => 1, 'refunded_qty' => 0, 'total_minor' => 1000, 'taxes_minor' => [], 'refunded_total_minor' => 0, 'refunded_taxes_minor' => [] ],
+];
+$ms = $T::spread_fees( $mixed, [ [ 'total_minor' => -500, 'taxes_minor' => [ 4 => -25 ] ] ] );
+check( 'spread: the fee tax lands only on lines carrying that rate', [ $ms[1]['taxes_minor'], $ms[2]['taxes_minor'], $ms[1]['total_minor'], $ms[2]['total_minor'] ], [ [ 4 => 75 ], [], 750, 750 ] );
+check( 'spread: a discount above the lines is held to them', [ $T::spread_fees( $mixed, [ [ 'total_minor' => -9000 ] ] )[1]['total_minor'], $T::spread_fees( $mixed, [ [ 'total_minor' => -9000 ] ] )[2]['total_minor'] ], [ 0, 0 ] );
+
+// settle(): line taxes stored unrounded (round at subtotal). Two lines of 10.00
+// with 0.825 tax each: per line 83 + 83, the order holds 1.65.
+$sub = [
+  1 => [ 'qty' => 1, 'refunded_qty' => 0, 'total_minor' => 1000, 'taxes_minor' => [ 4 => 83 ], 'refunded_total_minor' => 0, 'refunded_taxes_minor' => [] ],
+  2 => [ 'qty' => 1, 'refunded_qty' => 0, 'total_minor' => 1000, 'taxes_minor' => [ 4 => 83 ], 'refunded_total_minor' => 0, 'refunded_taxes_minor' => [] ],
+];
+check( 'rounded_sum: 0.825 + 0.825 rounds once to 1.65', Xophz_Compass_Bazaar_Refunds_Amounts::rounded_sum( [ '0.825', '0.825' ] ), 165 );
+$s1 = $T::settle( $sub, $T::compute( $sub, [ [ 'order_item_id' => 1, 'qty' => 1 ] ] ), [ 4 => 165 ], 2165 );
+check( 'round at subtotal: the first line refunds its own 83', $s1['total_minor'], 1083 );
+$sub[1]['refunded_qty']         = 1;
+$sub[1]['refunded_total_minor'] = 1000;
+$sub[1]['refunded_taxes_minor'] = [ 4 => 83 ];
+$s2 = $T::settle( $sub, $T::compute( $sub, [ [ 'order_item_id' => 2, 'qty' => 1 ] ] ), [ 4 => 165 - 83 ], 2165 - 1083 );
+check( 'round at subtotal: the last line takes the rate remainder 82 (was 83, refund_rejected)', [ $s2['lines'][0]['refund_tax'], $s2['total_minor'] ], [ [ 4 => 82 ], 1082 ] );
+$sub[1]['refunded_qty'] = 0;
+$sub[1]['refunded_total_minor'] = 0;
+$sub[1]['refunded_taxes_minor'] = [];
+$both = $T::settle( $sub, $T::compute( $sub, [ [ 'order_item_id' => 1, 'qty' => 1 ], [ 'order_item_id' => 2, 'qty' => 1 ] ] ), [ 4 => 165 ], 2165 );
+check( 'round at subtotal: both lines at once refund the order exactly', [ $both['tax_minor'], $both['total_minor'], $both['lines'][1]['refund_tax'] ], [ 165, 2165, [ 4 => 82 ] ] );
+$low = $sub;
+$low[1]['taxes_minor'] = [ 4 => 82 ];
+$low[2]['taxes_minor'] = [ 4 => 82 ];
+$up = $T::settle( $low, $T::compute( $low, [ [ 'order_item_id' => 1, 'qty' => 1 ], [ 'order_item_id' => 2, 'qty' => 1 ] ] ), [ 4 => Xophz_Compass_Bazaar_Refunds_Amounts::rounded_sum( [ '0.824', '0.824' ] ) ], 2165 );
+check( 'round at subtotal: 0.824 x 2 rounds to 1.65, the completing refund takes it', [ $up['tax_minor'], $up['lines'][1]['refund_tax'] ], [ 165, [ 4 => 83 ] ] );
+$part = $T::settle( $sub, $T::compute( $sub, [ [ 'order_item_id' => 1, 'qty' => 1 ] ] ), [ 4 => 50 ], 2165 );
+check( 'settle: a partial refund is held to what the rate has left', $part['lines'][0]['refund_tax'], [ 4 => 50 ] );
+check( 'settle: rates the order does not list are left alone', $T::settle( $sub, $T::compute( $sub, [ [ 'order_item_id' => 1, 'qty' => 1 ] ] ), [], 2165 )['total_minor'], 1083 );
+
+// settle(): the order's remaining amount.
+$fail_settle = function ( array $items, array $lines, int $left ) use ( $T ) {
+  try {
+    $T::settle( $items, $T::compute( $items, $lines ), [], $left );
+  } catch ( Xophz_Compass_Bazaar_Core_Http_Error $e ) {
+    return [ $e->error_code(), $e->status(), $e->data()['remaining_minor'] ?? null ];
+  }
+  return null;
+};
+check( 'order cap: a partial refund above what the order has left is refused', $fail_settle( $sub, [ [ 'order_item_id' => 1, 'qty' => 1 ] ], 900 ), [ 'refund_exceeds_order', 422, 900 ] );
+$cap = $T::settle( $sub, $T::compute( $sub, [ [ 'order_item_id' => 1, 'qty' => 1 ], [ 'order_item_id' => 2, 'qty' => 1 ] ] ), [], 2000 );
+check( 'order cap: the completing refund takes the remainder, line totals first', [ $cap['total_minor'], $cap['lines'][1]['refund_total_minor'], $cap['lines'][1]['refund_tax'] ], [ 2000, 834, [ 4 => 83 ] ] );
+
+// Random legacy orders with a negative fee, refunded in random steps: the
+// refunds add up to the order total exactly and no step is refused.
+mt_srand( 6995 );
+$bad = 0;
+for ( $n = 0; $n < 300; $n++ ) {
+  $order_items = [];
+  $raw_tax     = [];
+  $sum_lines   = 0;
+  for ( $i = 1, $count = mt_rand( 1, 4 ); $i <= $count; $i++ ) {
+    $total = mt_rand( 1, 20000 );
+    $tax   = intdiv( $total * 825 + 5000, 10000 );
+    $order_items[ $i ] = [ 'qty' => mt_rand( 1, 5 ), 'refunded_qty' => 0, 'total_minor' => $total, 'taxes_minor' => [ 4 => $tax ], 'refunded_total_minor' => 0, 'refunded_taxes_minor' => [] ];
+    $raw_tax[]  = Xophz_Compass_Bazaar_Core_Money::from_minor( $tax, 2 );
+    $sum_lines += $total;
+  }
+  $fee_total  = -mt_rand( 0, $sum_lines );
+  $fee_tax    = -intdiv( abs( $fee_total ) * 825 + 5000, 10000 );
+  $raw_tax[]  = Xophz_Compass_Bazaar_Core_Money::from_minor( $fee_tax, 2 );
+  $order_tax  = Xophz_Compass_Bazaar_Refunds_Amounts::rounded_sum( $raw_tax );
+  $order_tot  = $sum_lines + $fee_total + $order_tax;
+  $eff        = $T::spread_fees( $order_items, [ [ 'total_minor' => $fee_total, 'taxes_minor' => [ 4 => $fee_tax ] ] ] );
+  $refunded   = 0;
+  $guard      = 0;
+  while ( $guard++ < 40 ) {
+    $open = array_keys( array_filter( $eff, function ( $it ) { return $it['qty'] > $it['refunded_qty']; } ) );
+    if ( ! $open ) {
+      break;
+    }
+    $id   = $open[ mt_rand( 0, count( $open ) - 1 ) ];
+    $take = mt_rand( 1, $eff[ $id ]['qty'] - $eff[ $id ]['refunded_qty'] );
+    $done = array_sum( array_map( function ( $it ) { return (int) ( $it['refunded_taxes_minor'][4] ?? 0 ); }, $eff ) );
+    try {
+      $calc = $T::settle( $eff, $T::compute( $eff, [ [ 'order_item_id' => $id, 'qty' => $take ] ] ), [ 4 => $order_tax - $done ], $order_tot - $refunded );
+    } catch ( Xophz_Compass_Bazaar_Core_Http_Error $e ) {
+      $bad++;
+      break;
+    }
+    $line = $calc['lines'][0];
+    if ( $line['refund_total_minor'] < 0 || ( $line['refund_tax'][4] ?? 0 ) < 0 || $calc['total_minor'] > $order_tot - $refunded ) {
+      $bad++;
+    }
+    $refunded                                  += $calc['total_minor'];
+    $eff[ $id ]['refunded_qty']                += $take;
+    $eff[ $id ]['refunded_total_minor']        += $line['refund_total_minor'];
+    $eff[ $id ]['refunded_taxes_minor'][4]      = ( $eff[ $id ]['refunded_taxes_minor'][4] ?? 0 ) + ( $line['refund_tax'][4] ?? 0 );
+  }
+  if ( $refunded !== $order_tot ) {
+    $bad++;
+  }
+}
+check( 'random legacy orders: 300 orders with a discount fee refunded to the cent, never refused or over', $bad, 0 );
+
+bazaar_test_standalone( __FILE__ );

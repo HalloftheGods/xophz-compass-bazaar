@@ -95,6 +95,24 @@ class Xophz_Compass_Bazaar_Refunds_Repository {
   }
 
   /**
+   * Stamp the manager approval that covered a claimed refund (spec section
+   * 13.4). Runs inside the transaction that consumes the approval, so the
+   * refund row names its approval whether or not payment rows are written.
+   * Changes nothing once the refund is completed or failed.
+   *
+   * @return bool True when the row changed.
+   */
+  public static function set_approval( int $id, int $approval_id ): bool {
+    if ( $approval_id <= 0 ) {
+      return false;
+    }
+    return Xophz_Compass_Bazaar_Core_Db::exec(
+      'UPDATE ' . self::table() . ' SET approval_id = %d, updated_at = %s WHERE id = %d AND state = %s',
+      [ $approval_id, Xophz_Compass_Bazaar_Core_Db::now(), $id, self::STATE_CLAIMED ]
+    ) > 0;
+  }
+
+  /**
    * Mark a claimed refund completed, storing the WooCommerce refund id and the
    * response to replay. Only a claimed row moves.
    *
