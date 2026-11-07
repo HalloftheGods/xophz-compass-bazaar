@@ -3,13 +3,18 @@
  * Creates and upgrades the Bazaar tables with dbDelta.
  *
  * Tables and ledger history are never dropped by this plugin, including on
- * uninstall.
+ * uninstall. One exception: a multisite site's Scan a pile table goes with
+ * the site (Quick_Pile_Store::drop_with_site).
+ *
+ * Every table name carries $wpdb->prefix and the version is a per-site
+ * option, so in multisite each site installs its own tables on its first
+ * request after an upgrade.
  *
  * @package Xophz_Compass_Bazaar
  */
 class Xophz_Compass_Bazaar_Schema_Installer {
 
-  const DB_VERSION    = '26.11.01.1';
+  const DB_VERSION    = '26.11.06.1';
   const OPTION_VERSION = 'xophz_compass_bazaar_db_version';
   const OPTION_ENGINES = 'xophz_compass_bazaar_db_engines';
   const OPTION_LOCK    = 'xophz_compass_bazaar_db_lock';
@@ -36,7 +41,7 @@ class Xophz_Compass_Bazaar_Schema_Installer {
   }
 
   /**
-   * Run dbDelta over the ten tables, record storage engines, install roles
+   * Run dbDelta over the eleven tables, record storage engines, install roles
    * when the capabilities class exists, and store DB_VERSION.
    *
    * @return bool True when every table exists afterwards and the version was stored.
@@ -67,7 +72,7 @@ class Xophz_Compass_Bazaar_Schema_Installer {
   }
 
   /**
-   * Storage engine per table, from SHOW TABLE STATUS, for the ten Bazaar
+   * Storage engine per table, from SHOW TABLE STATUS, for the eleven Bazaar
    * tables (keys 'bazaar_<name>') and 'postmeta'. A table that does not exist
    * is left out.
    *

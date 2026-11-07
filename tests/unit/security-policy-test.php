@@ -1,7 +1,7 @@
 <?php
 /**
  * Security_Policy coverage: the policy keys equal every quoted 'wp_ajax_…'
- * key in admin/*.php and the orchestrator (56), and every policy cap is a
+ * key in admin/*.php and the orchestrator (64), and every policy cap is a
  * Bazaar cap. Also pins the signed-off defaults (spec section 2 and 6.3).
  */
 require_once dirname( __DIR__ ) . '/support/harness.php';
@@ -30,8 +30,8 @@ sort( $bazaar_scanned );
 $bazaar_policy = array_keys( $SP::AJAX );
 sort( $bazaar_policy );
 
-check( 'policy: the scan finds 56 distinct actions', count( $bazaar_scanned ), 56 );
-check( 'policy: 56 actions in the policy', count( $SP::AJAX ), 56 );
+check( 'policy: the scan finds 64 distinct actions', count( $bazaar_scanned ), 64 );
+check( 'policy: 64 actions in the policy', count( $SP::AJAX ), 64 );
 check( 'policy: registered actions missing from the policy', array_values( array_diff( $bazaar_scanned, $bazaar_policy ) ), [] );
 check( 'policy: policy actions no longer registered', array_values( array_diff( $bazaar_policy, $bazaar_scanned ) ), [] );
 check( 'policy: keys have no wp_ajax_ prefix', array_values( array_filter( $bazaar_policy, function ( $a ) {

@@ -230,6 +230,11 @@ class Xophz_Compass_Bazaar_Admin {
     (new Xophz_Compass_Bazaar_Admin_Product_Import())->import();
   }
 
+  /**
+   * bazaar_lookup_barcode: the global product lookup for the big product
+   * editor. Response shape unchanged: {success, product:{title, brand,
+   * description, category, image_url, barcode}} or {success:false, message}.
+   */
   public function lookupBarcode() {
     try {
       if (!current_user_can('manage_woocommerce') && !current_user_can('edit_products')) {
@@ -245,57 +250,9 @@ class Xophz_Compass_Bazaar_Admin {
         return;
       }
 
-      $title = '';
-      $brand = '';
-      $description = '';
-      $category = '';
-      $image_url = '';
+      $found = self::global_barcode_lookup($barcode);
 
-      // 1. Primary Query: Open Food Facts & Open Products Facts API
-      $url = 'https://world.openfoodfacts.org/api/v2/product/' . urlencode($barcode) . '.json';
-      $response = wp_remote_get($url, ['timeout' => 8, 'headers' => ['User-Agent' => 'CompassBazaar/1.0']]);
-
-      if (!is_wp_error($response) && wp_remote_retrieve_response_code($response) === 200) {
-        $body = wp_remote_retrieve_body($response);
-        $data = json_decode($body, true);
-
-        if (isset($data['status']) && $data['status'] === 1 && isset($data['product'])) {
-          $p = $data['product'];
-          $title = isset($p['product_name']) ? $p['product_name'] : '';
-          $brand = isset($p['brands']) ? $p['brands'] : '';
-          $category = isset($p['categories']) ? $p['categories'] : (isset($p['categories_old']) ? $p['categories_old'] : '');
-          $image_url = isset($p['image_url']) ? $p['image_url'] : (isset($p['image_front_url']) ? $p['image_front_url'] : '');
-          $description = isset($p['generic_name']) ? $p['generic_name'] : '';
-          
-          if (!empty($brand) && !empty($title) && stripos($title, $brand) === false) {
-            $title = $brand . ' ' . $title;
-          }
-        }
-      }
-
-      // 2. Secondary Query Fallback: UPCitemdb Trial API
-      if (empty($title)) {
-        $upc_url = 'https://api.upcitemdb.com/prod/trial/lookup?upc=' . urlencode($barcode);
-        $upc_response = wp_remote_get($upc_url, ['timeout' => 8]);
-
-        if (!is_wp_error($upc_response) && wp_remote_retrieve_response_code($upc_response) === 200) {
-          $upc_body = wp_remote_retrieve_body($upc_response);
-          $upc_data = json_decode($upc_body, true);
-
-          if (isset($upc_data['items']) && is_array($upc_data['items']) && count($upc_data['items']) > 0) {
-            $item = $upc_data['items'][0];
-            $title = isset($item['title']) ? $item['title'] : '';
-            $brand = isset($item['brand']) ? $item['brand'] : '';
-            $description = isset($item['description']) ? $item['description'] : '';
-            $category = isset($item['category']) ? $item['category'] : '';
-            if (isset($item['images']) && is_array($item['images']) && count($item['images']) > 0) {
-              $image_url = $item['images'][0];
-            }
-          }
-        }
-      }
-
-      if (empty($title)) {
+      if ('found' !== $found['status'] || empty($found['product']['title'])) {
         Xophz_Compass::output_json([
           'success' => false,
           'message' => "No product record found in global database for barcode {$barcode}."
@@ -303,20 +260,193 @@ class Xophz_Compass_Bazaar_Admin {
         return;
       }
 
+      $p = $found['product'];
       Xophz_Compass::output_json([
         'success' => true,
         'product' => [
-          'title' => $title,
-          'brand' => $brand,
-          'description' => $description,
-          'category' => $category,
-          'image_url' => $image_url,
+          'title' => $p['title'],
+          'brand' => $p['brand'],
+          'description' => $p['description'],
+          'category' => $p['category'],
+          'image_url' => $p['image_url'],
           'barcode' => $barcode
         ]
       ]);
     } catch (\Throwable $e) {
       Xophz_Compass::output_json(['success' => false, 'message' => $e->getMessage()]);
     }
+  }
+
+  /** User-Agent Open Food Facts asks every API client to send. */
+  const OFF_USER_AGENT = 'WestwoodCompassBazaar/1.0 (+https://www.westwooddiscount.com)';
+
+  /** Seconds each provider request may take. */
+  const LOOKUP_TIMEOUT = 4;
+
+  /** Transient prefix of the provider cache (key: md5 of the normalized code). */
+  const LOOKUP_CACHE_PREFIX = 'bazaar_bc_lookup_';
+
+  /**
+   * Look a barcode up in the global databases: Open Food Facts first, then the
+   * UPCitemdb trial API. Returns data and never sends a response, so the old
+   * editor lookup and Quick Add share it.
+   *
+   * Results are cached in a transient keyed by the normalized code: found for
+   * 30 days, not found for 3 days, anything else (rate limited, timeout,
+   * server error) for 15 minutes. A UPCitemdb 429 is 'rate_limited', never
+   * 'not_found'.
+   *
+   * @param string $barcode As scanned or typed.
+   * @return array{status:string,source:string,product:?array,price_hint:?array,cached:bool}
+   *   status: 'found', 'not_found', 'rate_limited' or 'error'.
+   *   product: title, brand, description, category, image_url (strings).
+   *   price_hint: low, high (strings with 2 decimals), source.
+   */
+  public static function global_barcode_lookup(string $barcode): array {
+    $code = Xophz_Compass_Bazaar_Barcode::normalize($barcode);
+    $query = '' !== $code['normalized'] ? $code['normalized'] : $code['raw'];
+    $empty = ['status' => 'not_found', 'source' => '', 'product' => null, 'price_hint' => null, 'cached' => false];
+    if ('' === $query) {
+      return $empty;
+    }
+
+    $cache_key = self::LOOKUP_CACHE_PREFIX . md5($query);
+    $cached = get_transient($cache_key);
+    if (is_array($cached) && isset($cached['status'])) {
+      $cached['cached'] = true;
+      return array_merge($empty, $cached);
+    }
+
+    $off_code = '' !== $code['normalized'] ? Xophz_Compass_Bazaar_Barcode::off_query_code($code) : $query;
+    $off = self::lookup_open_food_facts($off_code);
+    $result = $off;
+    if ('found' !== $off['status']) {
+      $upc = self::lookup_upcitemdb($query);
+      if ('found' === $upc['status']) {
+        $result = $upc;
+      } elseif ('not_found' === $off['status'] && 'not_found' === $upc['status']) {
+        $result = $upc;
+      } elseif ('rate_limited' === $upc['status']) {
+        $result = $upc;
+      } else {
+        $result = ['status' => 'error', 'source' => '', 'product' => null, 'price_hint' => null];
+      }
+    }
+
+    $ttl = [
+      'found' => 30 * DAY_IN_SECONDS,
+      'not_found' => 3 * DAY_IN_SECONDS,
+    ][$result['status']] ?? 15 * MINUTE_IN_SECONDS;
+    $result = array_merge($empty, $result);
+    $store = $result;
+    unset($store['cached']);
+    set_transient($cache_key, $store, $ttl);
+    return $result;
+  }
+
+  /** Open Food Facts v2. @return array status, source, product, price_hint */
+  private static function lookup_open_food_facts(string $code): array {
+    $out = ['status' => 'error', 'source' => 'openfoodfacts', 'product' => null, 'price_hint' => null];
+    $url = 'https://world.openfoodfacts.org/api/v2/product/' . rawurlencode($code) . '.json';
+    $response = wp_remote_get($url, [
+      'timeout' => self::LOOKUP_TIMEOUT,
+      'user-agent' => self::OFF_USER_AGENT,
+      'headers' => ['User-Agent' => self::OFF_USER_AGENT, 'Accept' => 'application/json'],
+    ]);
+    if (is_wp_error($response)) {
+      return $out;
+    }
+    $status = (int) wp_remote_retrieve_response_code($response);
+    $data = json_decode((string) wp_remote_retrieve_body($response), true);
+    if (404 === $status || (200 === $status && is_array($data) && isset($data['status']) && 1 !== (int) $data['status'])) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    if (429 === $status) {
+      $out['status'] = 'rate_limited';
+      return $out;
+    }
+    if (200 !== $status || !is_array($data) || !isset($data['product']) || !is_array($data['product'])) {
+      return $out;
+    }
+
+    $p = $data['product'];
+    $title = self::lookup_string($p['product_name'] ?? '');
+    $brand = self::lookup_string($p['brands'] ?? '');
+    if ('' === $title) {
+      // A record without a name is no help to a person adding stock.
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    if ('' !== $brand && stripos($title, $brand) === false) {
+      $title = $brand . ' ' . $title;
+    }
+    $out['status'] = 'found';
+    $out['product'] = [
+      'title' => $title,
+      'brand' => $brand,
+      'description' => self::lookup_string($p['generic_name'] ?? ''),
+      'category' => self::lookup_string($p['categories'] ?? ($p['categories_old'] ?? '')),
+      'image_url' => self::lookup_string($p['image_url'] ?? ($p['image_front_url'] ?? '')),
+    ];
+    return $out;
+  }
+
+  /** UPCitemdb trial API. A 429 is rate_limited. @return array status, source, product, price_hint */
+  private static function lookup_upcitemdb(string $code): array {
+    $out = ['status' => 'error', 'source' => 'upcitemdb', 'product' => null, 'price_hint' => null];
+    $response = wp_remote_get('https://api.upcitemdb.com/prod/trial/lookup?upc=' . rawurlencode($code), [
+      'timeout' => self::LOOKUP_TIMEOUT,
+      'headers' => ['Accept' => 'application/json'],
+    ]);
+    if (is_wp_error($response)) {
+      return $out;
+    }
+    $status = (int) wp_remote_retrieve_response_code($response);
+    if (429 === $status) {
+      $out['status'] = 'rate_limited';
+      return $out;
+    }
+    if (400 === $status || 404 === $status) {
+      // 400 is INVALID_UPC: the code is not one UPCitemdb can know.
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    $data = json_decode((string) wp_remote_retrieve_body($response), true);
+    if (200 !== $status || !is_array($data)) {
+      return $out;
+    }
+    $items = isset($data['items']) && is_array($data['items']) ? $data['items'] : [];
+    $item = isset($items[0]) && is_array($items[0]) ? $items[0] : null;
+    $title = $item ? self::lookup_string($item['title'] ?? '') : '';
+    if ('' === $title) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    $images = isset($item['images']) && is_array($item['images']) ? array_values($item['images']) : [];
+    $out['status'] = 'found';
+    $out['product'] = [
+      'title' => $title,
+      'brand' => self::lookup_string($item['brand'] ?? ''),
+      'description' => self::lookup_string($item['description'] ?? ''),
+      'category' => self::lookup_string($item['category'] ?? ''),
+      'image_url' => isset($images[0]) ? self::lookup_string($images[0]) : '',
+    ];
+    $low = $item['lowest_recorded_price'] ?? null;
+    $high = $item['highest_recorded_price'] ?? null;
+    if (is_numeric($low) && is_numeric($high) && (float) $low > 0 && (float) $high >= (float) $low) {
+      $out['price_hint'] = [
+        'low' => number_format((float) $low, 2, '.', ''),
+        'high' => number_format((float) $high, 2, '.', ''),
+        'source' => 'upcitemdb',
+      ];
+    }
+    return $out;
+  }
+
+  /** A provider field as a trimmed plain string ('' for arrays and null). */
+  private static function lookup_string($value): string {
+    return is_scalar($value) ? trim(wp_strip_all_tags((string) $value)) : '';
   }
 
 

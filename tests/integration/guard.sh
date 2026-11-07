@@ -66,7 +66,7 @@ expect 'legacy map: administrator gets bazaar_manage_settings from manage_woocom
 
 ACTIONS="$(wp_eval "echo implode(',', array_keys(${P}_Security_Policy::AJAX));" | tail -1)"
 IFS=',' read -r -a ACTION_LIST <<<"$ACTIONS"
-expect_equal 'policy: 56 actions' "${#ACTION_LIST[@]}" '56'
+expect_equal 'policy: 64 actions' "${#ACTION_LIST[@]}" '64'
 
 # Throwaway users, deleted on exit.
 SUFFIX="$(date +%s)$RANDOM"

@@ -5,7 +5,8 @@
  * Spec: docs/plugins/bazaar-core-v2.md section 6.4 and 6.5.
  *
  * admin-ajax (enforce_ajax), in order:
- *   1. An action missing from Security_Policy is logged
+ *   1. An action missing from Security_Policy (and from the module policies
+ *      in MODULE_POLICIES, see caps_for) is logged
  *      (bazaar_guard_unmapped:<action>) and refused 403 {code:'forbidden'}.
  *   2. Nonce shim: no X-WP-Nonce and no _wpnonce, but a `security` field,
  *      copies that field to $_REQUEST['_wpnonce'] (the phone app).
@@ -34,6 +35,14 @@ class Xophz_Compass_Bazaar_Security_Guard {
   const REPORT_ONLY_FLAG = 'XOPHZ_BAZAAR_GUARD_REPORT_ONLY';
   const DRY_RUN_ENVS     = [ 'local', 'development' ];
   const SESSION_CLASS    = 'Xophz_Compass_Bazaar_Staff_Sessions';
+
+  /**
+   * Admin modules that declare the caps of their own admin-ajax actions with
+   * a public static policy(): array (action => caps). Consulted only for an
+   * action Security_Policy does not map, so Security_Policy always wins. A
+   * fixed list of classes, never a filter: no other code can open an action.
+   */
+  const MODULE_POLICIES = [ 'Xophz_Compass_Bazaar_Admin_Quick_Add', 'Xophz_Compass_Bazaar_Admin_Quick_Pile' ];
 
   /** @var Xophz_Compass_Bazaar_Security_Context|null */
   private static $context = null;
@@ -94,12 +103,35 @@ class Xophz_Compass_Bazaar_Security_Guard {
   }
 
   /**
+   * The caps for one admin-ajax action: Security_Policy's entry, else the
+   * entry of a module in MODULE_POLICIES. Null when nobody maps it.
+   *
+   * @return string[]|null
+   */
+  public static function caps_for( string $action ): ?array {
+    $caps = Xophz_Compass_Bazaar_Security_Policy::caps_for( $action );
+    if ( null !== $caps ) {
+      return $caps;
+    }
+    foreach ( self::MODULE_POLICIES as $class ) {
+      if ( ! class_exists( $class ) || ! method_exists( $class, 'policy' ) ) {
+        continue;
+      }
+      $map = $class::policy();
+      if ( isset( $map[ $action ] ) && is_array( $map[ $action ] ) && [] !== $map[ $action ] ) {
+        return array_values( $map[ $action ] );
+      }
+    }
+    return null;
+  }
+
+  /**
    * Guard one admin-ajax action. Returns the stored context when the handler
    * may run, or null after the guard answered (refusal or dry run).
    */
   public static function enforce_ajax( string $action ): ?Xophz_Compass_Bazaar_Security_Context {
     self::reset();
-    $caps = Xophz_Compass_Bazaar_Security_Policy::caps_for( $action );
+    $caps = self::caps_for( $action );
     if ( null === $caps ) {
       error_log( 'bazaar_guard_unmapped:' . $action );
       self::send_forbidden();

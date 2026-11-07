@@ -1,0 +1,7 @@
+# Test scripts are for the command line only.
+<IfModule mod_authz_core.c>
+  Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+  Deny from all
+</IfModule>

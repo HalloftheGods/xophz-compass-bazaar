@@ -2,7 +2,7 @@
 # Live check of the Bazaar schema and the Core_Db / Events_Outbox helpers
 # against the local Docker WordPress.
 #
-# Asserts: the ten tables exist and are InnoDB, the installer is idempotent and
+# Asserts: the eleven tables exist and are InnoDB, the installer is idempotent and
 # stores its version and engine option, Core_Db transactions (rollback, nesting,
 # after_commit, after_rollback, typed duplicate-key errors) and the outbox.
 # Roles are checked only when Security_Capabilities exists (a later package).
@@ -25,7 +25,7 @@ out="$(wp_eval "echo ${P}_Schema_Installer::install() ? 'installed' : 'incomplet
 expect 'installer: running it twice is fine' "$out" 'installed'
 
 out="$(wp_eval 'global $wpdb; foreach (Xophz_Compass_Bazaar_Schema_Tables::NAMES as $n) { $t = $wpdb->prefix . "bazaar_" . $n; $e = $wpdb->get_var($wpdb->prepare("SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s", $t)); echo $n . "=" . ($e ?: "MISSING") . "\n"; }')"
-for name in stock_batches stock_movements stock_balances checkouts payments refunds staff staff_sessions approvals events; do
+for name in stock_batches stock_movements stock_balances checkouts payments refunds staff staff_sessions approvals events quick_pile; do
   expect "table: $name exists and is InnoDB" "$out" "$name=InnoDB"
 done
 

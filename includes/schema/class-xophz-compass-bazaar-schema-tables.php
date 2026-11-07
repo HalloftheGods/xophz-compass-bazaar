@@ -1,6 +1,6 @@
 <?php
 /**
- * SQL for the ten Bazaar tables (spec section 7.1), written for dbDelta:
+ * SQL for the eleven Bazaar tables (spec section 7.1), written for dbDelta:
  * one column per line, two spaces after PRIMARY KEY, KEY (not INDEX), no
  * foreign keys. Every datetime column is UTC.
  *
@@ -12,7 +12,7 @@
 class Xophz_Compass_Bazaar_Schema_Tables {
 
   /** Short names (without the prefix and "bazaar_"), in creation order. */
-  const NAMES = ['stock_batches', 'stock_movements', 'stock_balances', 'checkouts', 'payments', 'refunds', 'staff', 'staff_sessions', 'approvals', 'events'];
+  const NAMES = ['stock_batches', 'stock_movements', 'stock_balances', 'checkouts', 'payments', 'refunds', 'staff', 'staff_sessions', 'approvals', 'events', 'quick_pile'];
 
   /**
    * CREATE TABLE statements keyed by short name.
@@ -286,6 +286,33 @@ CREATE TABLE {p}bazaar_events (
   UNIQUE KEY event_uuid (event_uuid),
   KEY type_id (type,id),
   KEY undispatched (dispatched_at,id)
+) ENGINE=InnoDB {collate};
+SQL,
+
+    // open_key is binary so the UNIQUE key compares codes byte for byte (no
+    // case or accent folding) and is NULL once a row is done, so a finished
+    // code can be scanned again. See Quick_Pile_Store.
+    'quick_pile' => <<<'SQL'
+CREATE TABLE {p}bazaar_quick_pile (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  open_key varbinary(80) DEFAULT NULL,
+  barcode varchar(64) NOT NULL DEFAULT '',
+  normalized varchar(20) NOT NULL DEFAULT '',
+  valid tinyint(1) NOT NULL DEFAULT 0,
+  qty int(10) unsigned NOT NULL DEFAULT 0,
+  title varchar(200) NOT NULL DEFAULT '',
+  thumb varchar(1000) NOT NULL DEFAULT '',
+  product_id bigint(20) unsigned DEFAULT NULL,
+  status varchar(10) NOT NULL DEFAULT 'open',
+  created_by bigint(20) unsigned NOT NULL DEFAULT 0,
+  claim_key char(32) DEFAULT NULL,
+  saved_product_id bigint(20) unsigned DEFAULT NULL,
+  created_at datetime NOT NULL,
+  updated_at datetime NOT NULL,
+  done_at datetime DEFAULT NULL,
+  PRIMARY KEY  (id),
+  UNIQUE KEY open_key (open_key),
+  KEY status_created (status,created_at)
 ) ENGINE=InnoDB {collate};
 SQL,
 

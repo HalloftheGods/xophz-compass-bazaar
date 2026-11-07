@@ -1,6 +1,6 @@
 <?php
 /**
- * Schema_Tables: shape of the ten CREATE TABLE statements (not run against MySQL here).
+ * Schema_Tables: shape of the eleven CREATE TABLE statements (not run against MySQL here).
  */
 require_once dirname( __DIR__ ) . '/support/harness.php';
 require_once dirname( dirname( __DIR__ ) ) . '/includes/schema/class-xophz-compass-bazaar-schema-tables.php';
@@ -9,8 +9,8 @@ require_once dirname( dirname( __DIR__ ) ) . '/includes/schema/class-xophz-compa
 $T    = 'Xophz_Compass_Bazaar_Schema_Tables';
 $defs = $T::definitions( 'wp_', 'DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci' );
 
-$expected = [ 'stock_batches', 'stock_movements', 'stock_balances', 'checkouts', 'payments', 'refunds', 'staff', 'staff_sessions', 'approvals', 'events' ];
-check( 'tables: the ten names in order', array_keys( $defs ), $expected );
+$expected = [ 'stock_batches', 'stock_movements', 'stock_balances', 'checkouts', 'payments', 'refunds', 'staff', 'staff_sessions', 'approvals', 'events', 'quick_pile' ];
+check( 'tables: the eleven names in order', array_keys( $defs ), $expected );
 check( 'tables: NAMES matches', $T::NAMES, $expected );
 
 foreach ( $defs as $name => $sql ) {
@@ -32,6 +32,7 @@ foreach ( $defs as $name => $sql ) {
 }
 
 check( 'tables: a different prefix is applied', 0 === strpos( $T::definitions( 'x7_', '' )['events'], 'CREATE TABLE x7_bazaar_events (' ), true );
+check( 'tables: a multisite site gets its own pile table', 0 === strpos( $T::definitions( 'wp_2_', '' )['quick_pile'], 'CREATE TABLE wp_2_bazaar_quick_pile (' ), true );
 
 // Spot checks on keys other code relies on.
 check( 'tables: stock idem key is unique', false !== strpos( $defs['stock_batches'], 'UNIQUE KEY idem_key (idem_key)' ), true );
@@ -41,7 +42,8 @@ check( 'tables: balances are keyed by product and location', false !== strpos( $
 check( 'tables: approvals token hash is unique', false !== strpos( $defs['approvals'], 'UNIQUE KEY token_hash (token_hash)' ), true );
 check( 'tables: events uuid is unique', false !== strpos( $defs['events'], 'UNIQUE KEY event_uuid (event_uuid)' ), true );
 check( 'tables: payments uuid is unique', false !== strpos( $defs['payments'], 'UNIQUE KEY payment_uuid (payment_uuid)' ), true );
+check( 'tables: one open pile row per code', false !== strpos( $defs['quick_pile'], 'UNIQUE KEY open_key (open_key)' ), true );
 
-check( 'installer: DB_VERSION', Xophz_Compass_Bazaar_Schema_Installer::DB_VERSION, '26.11.01.1' );
+check( 'installer: DB_VERSION', Xophz_Compass_Bazaar_Schema_Installer::DB_VERSION, '26.11.06.1' );
 
 bazaar_test_standalone( __FILE__ );

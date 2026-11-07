@@ -168,6 +168,14 @@ class Xophz_Compass_Bazaar extends Xophz_Compass_Plugin_Base {
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-bazaar-admin-promotions.php';
 
     /**
+      * Quick Add: barcode helpers (pure) and the phone-first add/restock handlers
+    */
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/class-xophz-compass-bazaar-barcode.php';
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-bazaar-admin-quick-add.php';
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/class-xophz-compass-bazaar-quick-pile-store.php';
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-bazaar-admin-quick-pile.php';
+
+    /**
       * The class responsible for products 
     */
     // require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-bazaar-admin.php';
@@ -231,6 +239,8 @@ class Xophz_Compass_Bazaar extends Xophz_Compass_Plugin_Base {
     $this->define_class_hooks('Xophz_Compass_Bazaar_Admin_Multi_Inventory');
     $this->define_class_hooks('Xophz_Compass_Bazaar_Admin_Fulfillment');
     $this->define_class_hooks('Xophz_Compass_Bazaar_Admin_Promotions');
+    $this->define_class_hooks('Xophz_Compass_Bazaar_Admin_Quick_Add');
+    $this->define_class_hooks('Xophz_Compass_Bazaar_Admin_Quick_Pile');
   } 
 
   public function define_class_hooks($class){
@@ -269,6 +279,8 @@ class Xophz_Compass_Bazaar extends Xophz_Compass_Plugin_Base {
 			$this->registered_actions = Xophz_Compass_Bazaar_Security_Guard::wrap_ajax_actions( $this->registered_actions );
 		}
 		add_action( 'init', [ 'Xophz_Compass_Bazaar_Schema_Installer', 'maybe_install' ], 1 );
+		// Multisite: drop a site's pile table (Schema_Installer made it) when the site is deleted.
+		add_filter( 'wpmu_drop_tables', [ 'Xophz_Compass_Bazaar_Quick_Pile_Store', 'drop_with_site' ], 10, 2 );
 		$this->run_hooks();
 	}
 

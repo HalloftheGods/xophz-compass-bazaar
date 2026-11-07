@@ -2,6 +2,15 @@
 
 All notable changes to the Compass Bazaar plugin. Newest first.
 
+## 2026-11-06
+
+### Added
+- **Quick Add**: a phone-first add and restock screen: `bazaar_quick_lookup`, `bazaar_quick_save`, `bazaar_quick_undo` and `bazaar_quick_recent`, with barcode helpers. A save applies once per user and `client_uuid`; undo works for 15 minutes.
+- **Scan a pile**: scan everything first, price it after. `bazaar_pile_add`, `bazaar_pile_list`, `bazaar_pile_set_qty` and `bazaar_pile_resolve` over a new per-site table, `bazaar_quick_pile`, created by `Schema_Installer` (DB version 26.11.06.1). A save with `pile_id` takes the row before writing stock, so one row cannot add stock twice; an undo puts the row back.
+
+### Changed
+- `Security_Policy` maps 64 admin-ajax actions (was 56). Quick Add and Scan a pile ask for Bazaar caps and the `wp_rest` nonce only, so `bazaar_stock_clerk` can use them.
+
 ## 2026-11-01
 
 ### Added
