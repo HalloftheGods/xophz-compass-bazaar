@@ -12,6 +12,8 @@
  *   digit matches (an 8 digit code also counts when it is a valid UPC-E).
  * - candidates lists the code as typed first, then the digit forms; no
  *   duplicates and no empty strings. It is meant for exact SKU matches only.
+ * - A GS1 element string, '(01)' or '01' before 14 digits, reads as those 14
+ *   digits only when they are a valid GTIN-14.
  * - A code with anything other than digits, spaces and dashes (a house
  *   label such as WD-00042) is never valid, has an empty normalized form
  *   and has only its as-typed form as a candidate.
@@ -114,6 +116,18 @@ class Xophz_Compass_Bazaar_Barcode {
   }
 
   /**
+   * The 14 digits of a GS1 element string, '(01)' or '01' before a valid
+   * GTIN-14 (what an RSS or GS1-128 label reads as); anything else unchanged.
+   */
+  public static function strip_gs1_prefix( string $clean ): string {
+    $compact = (string) preg_replace( '/[\s-]/', '', $clean );
+    if ( preg_match( '/^(?:\(01\)|01)(\d{14})$/', $compact, $match ) && self::has_valid_check_digit( $match[1] ) ) {
+      return $match[1];
+    }
+    return $clean;
+  }
+
+  /**
    * Read a scanned or typed code.
    *
    * normalized: the canonical form used as a new product's SKU and as the
@@ -128,7 +142,8 @@ class Xophz_Compass_Bazaar_Barcode {
    */
   public static function normalize( $raw ): array {
     $clean  = self::clean_raw( $raw );
-    $digits = self::digits( $clean );
+    $code   = self::strip_gs1_prefix( $clean );
+    $digits = self::digits( $code );
     $len    = strlen( $digits );
     $kind   = 'unknown';
     $norm   = $digits;
@@ -136,7 +151,7 @@ class Xophz_Compass_Bazaar_Barcode {
     $forms  = [];
     // A code with letters (a house label such as WD-00042) is only ever
     // matched as typed: its digits alone would be some other item's SKU.
-    $house  = (bool) preg_match( '/[^\d\s-]/', $clean );
+    $house  = (bool) preg_match( '/[^\d\s-]/', $code );
     if ( $house ) {
       $norm = '';
       $len  = 0;
@@ -189,6 +204,37 @@ class Xophz_Compass_Bazaar_Barcode {
       'kind'       => $kind,
       'candidates' => $candidates,
     ];
+  }
+
+  /** True for an EAN-8 number GS1 keeps out of general use: it starts with 0 or 2. */
+  private static function is_restricted_gtin8( string $code ): bool {
+    return '0' === $code[0] || '2' === $code[0];
+  }
+
+  /**
+   * True when a code names the same item in every store: a valid check digit
+   * and none of the ranges GS1 leaves to one store or one company. Those are
+   * EAN-8 starting with 0 or 2; GTIN-13 starting with 02, 04, 05, 2x, 98 or
+   * 99 (in-store, variable measure and coupons; a 12 digit UPC-A is its
+   * GTIN-13 with a leading 0); 00000 before a restricted GTIN-8; and GTIN-14
+   * with indicator 9 or a restricted GTIN-13 part.
+   */
+  public static function is_shared_gtin( string $code ): bool {
+    if ( ! self::has_valid_check_digit( $code ) ) {
+      return false;
+    }
+    if ( 8 === strlen( $code ) ) {
+      return ! self::is_restricted_gtin8( $code );
+    }
+    $gtin14 = str_pad( $code, 14, '0', STR_PAD_LEFT );
+    if ( '9' === $gtin14[0] ) {
+      return false;
+    }
+    $gtin13 = substr( $gtin14, 1 );
+    if ( 0 === strpos( $gtin13, '00000' ) ) {
+      return ! self::is_restricted_gtin8( substr( $gtin13, 5 ) );
+    }
+    return ! preg_match( '/^(?:02|04|05|2\d|98|99)/', $gtin13 );
   }
 
   /**

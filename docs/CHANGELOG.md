@@ -2,6 +2,24 @@
 
 All notable changes to the Compass Bazaar plugin. Newest first.
 
+## 2026-11-07
+
+### Added
+- **More barcode sources**: when Open Food Facts misses, the lookup asks Open Beauty, Open Pet Food and Open Products Facts in parallel (filter `bazaar_barcode_lookup_parallel` turns that off), then UPCitemdb. Sources and parsers live in `Barcode_Sources`, requests in `Barcode_Fetcher`.
+- **Barcode memory**: a network-wide table, `{base_prefix}bazaar_barcode_memory`, so a code one store learned names the item for the next store with no provider call. It holds a name, a brand and a picture address, never a price, stock or which site sells the item. Restricted and in-store GS1 ranges are never stored (`Barcode::is_shared_gtin`). Undo of a Quick Add create puts the row back. Off switch: network option or filter `bazaar_barcode_memory_enabled`. Filter: `bazaar_barcode_memory_row`.
+- **`bazaar_quick_image`**: shows a found picture through the store's own server (`wp_safe_remote_get`, 4 MB, jpeg, png, gif or webp only), as JSON because an `<img>` cannot send the nonce header. `Security_Policy` now maps 65 actions.
+- A lookup returns up to five pictures (`draft.image_urls`). A save tries them in order, accepting only URLs from that user's last lookup of the code or an Open*Facts host.
+- Camera: Codabar, RSS-14 and RSS Expanded. The native reader is used only if it lists the four shelf formats. `(01)` before a valid GTIN-14 is read as the GTIN.
+
+### Changed
+- Quick Add's action bar is one row, the main button on the right, with shorter labels (the full wording stays as the accessible name). A fourth button is the one case that wraps.
+- The whole price keypad fits above the action bar at 360x640, 360x780 and 412x915. Under 700px tall, keys are 56px and the price in words is hidden.
+- A price hint drops its high when it is more than 4 times the low ("Seen online from about $2.05").
+
+### Fixed
+- Quick Add's scan box: the camera area now fills its window, and a centered guide replaces html5-qrcode's box, which landed off-center on the cropped video. The whole picture is read.
+- Quick Add pictures never showed: the `v-img` had no width in the card's centered grid. Pictures on http or non-Open*Facts hosts also could not be shown or saved.
+
 ## 2026-11-06
 
 ### Added

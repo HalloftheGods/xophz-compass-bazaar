@@ -40,6 +40,9 @@ if ( ! function_exists( 'wp_get_environment_type' ) ) {
 if ( ! function_exists( 'apply_filters' ) ) {
   function apply_filters( $hook, $value ) { return array_key_exists( $hook, $GLOBALS['test_filters'] ) ? $GLOBALS['test_filters'][ $hook ] : $value; }
 }
+if ( ! function_exists( 'sanitize_text_field' ) ) {
+  function sanitize_text_field( $text ) { return trim( (string) preg_replace( '/\s+/', ' ', strip_tags( (string) $text ) ) ); }
+}
 if ( ! function_exists( 'wp_unslash' ) ) {
   /** Same behaviour as WordPress: strips one level of slashes from strings, recursively. */
   function wp_unslash( $value ) {

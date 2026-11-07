@@ -57,6 +57,7 @@ foreach ( [ 'quick-add', 'quick-pile' ] as $qa_file ) {
 check( 'quick add: save needs stock or catalog', $qa_policy['bazaar_quick_save'], [ $SC::MANAGE_STOCK, $SC::MANAGE_CATALOG ] );
 check( 'quick add: undo needs stock or catalog', $qa_policy['bazaar_quick_undo'], [ $SC::MANAGE_STOCK, $SC::MANAGE_CATALOG ] );
 check( 'quick add: lookup allows receive', in_array( $SC::RECEIVE, $qa_policy['bazaar_quick_lookup'], true ), true );
+check( 'quick add: image has the lookup caps', $qa_policy['bazaar_quick_image'] ?? null, $qa_policy['bazaar_quick_lookup'] );
 check( 'quick add: an unknown action stays unmapped', $SG::caps_for( 'bazaar_quick_nope' ), null );
 
 // The longest client_uuid quickSave accepts, with the longest suffix a stock

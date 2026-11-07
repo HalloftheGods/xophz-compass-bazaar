@@ -105,6 +105,20 @@ $n = $B::normalize( 'X036000291452' );
 check( 'letters before a valid UPC stay a house code', $n['candidates'], [ 'X036000291452' ] );
 check( 'letters before a valid UPC not valid', $n['valid'], false );
 
+// GS1 element strings: (01) or a leading 01 goes only before a valid GTIN-14.
+check( '(01) stripped', $B::normalize( '(01)00036000291452' )['normalized'], '036000291452' );
+check( '(01) valid', $B::normalize( '(01)00036000291452' )['valid'], true );
+check( 'leading 01 stripped', $B::normalize( '0100036000291452' )['normalized'], '036000291452' );
+check( '(01) with a space', $B::normalize( '(01) 00036000291452' )['normalized'], '036000291452' );
+check( '(01) raw keeps what was read', $B::normalize( '(01)00036000291452' )['raw'], '(01)00036000291452' );
+check( '(01) with GTIN-14 indicator', $B::normalize( '(01)' . $g14 )['normalized'], $g14 );
+check( '(01) bad check digit stays a house code', $B::normalize( '(01)00036000291453' )['candidates'], [ '(01)00036000291453' ] );
+check( '(01) bad check digit not valid', $B::normalize( '(01)00036000291453' )['valid'], false );
+check( 'leading 01 bad check digit not valid', $B::normalize( '0100036000291453' )['valid'], false );
+check( '01 before 12 digits unchanged', $B::strip_gs1_prefix( '01036000291452' ), '01036000291452' );
+check( 'valid GTIN-14 starting 01 unchanged', $B::strip_gs1_prefix( '01234567890128' ), '01234567890128' );
+check( '(01) with more data stays a house code', $B::normalize( '(01)00036000291452(17)261231' )['valid'], false );
+
 // Junk input never throws.
 check( 'empty', $B::normalize( '' )['candidates'], [] );
 check( 'array input', $B::normalize( [ 'x' ] )['raw'], '' );

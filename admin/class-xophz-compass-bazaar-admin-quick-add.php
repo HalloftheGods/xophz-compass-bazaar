@@ -6,6 +6,10 @@
  *   bazaar_quick_save    {client_uuid, mode, ...}   -> action, product, stock_before/after, undo_token
  *   bazaar_quick_undo    {undo_token}               -> action 'undone', product|null
  *   bazaar_quick_recent  {}                         -> today_count, items (current user, today)
+ *   bazaar_quick_image   {url}                      -> mime, data_base64 (a found picture, through this server)
+ *
+ * bazaar_quick_image answers JSON, not image bytes: an <img> cannot send the
+ * X-WP-Nonce header the guard asks for, and a nonce should not sit in a URL.
  *
  * Scan a pile (see Admin_Quick_Pile): a save may carry pile_id (modes add and
  * create). The pile row is taken before any stock is written and marked done
@@ -18,7 +22,7 @@
  *
  * Guarantees:
  * - The computer never sets a price or a count: every price and quantity
- *   written comes from the request. A lookup never writes.
+ *   written comes from the request. A lookup never writes to the catalog.
  * - Existing items are found by exact SKU match on each candidate form of the
  *   code (never LIKE or prefix), then by WooCommerce's global unique id.
  * - Stock writes go through the same path as Admin_Product_Stock: the ledger
@@ -34,6 +38,13 @@
  * - A save is applied at most once per user and client_uuid within 10
  *   minutes: a repeat returns the stored result. Only successes are stored,
  *   so "Try again" with the same client_uuid re-runs a failed save.
+ * - A create attaches a picture only from this user's last lookup of the
+ *   code, or an Open*Facts host, trying each in turn for at most
+ *   IMAGE_BUDGET seconds; no picture still saves the item.
+ * - A create with a shareable code also goes in the Barcode_Memory, so other
+ *   stores on this install can name the item (never its price or stock). An
+ *   undo of that create takes the memory row back to how it was. A failure
+ *   there never fails the save or the undo.
  * - A price under 0.25 or over 50 is refused with code confirm_price unless
  *   the request has price_confirmed true.
  * - An undo token works once, for 15 minutes, for the user who saved.
@@ -64,6 +75,7 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
     'wp_ajax_bazaar_quick_save'   => 'quickSave',
     'wp_ajax_bazaar_quick_undo'   => 'quickUndo',
     'wp_ajax_bazaar_quick_recent' => 'quickRecent',
+    'wp_ajax_bazaar_quick_image'  => 'quickImage',
   ];
 
   const MODES              = [ 'add', 'create', 'set' ];
@@ -87,8 +99,8 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
   const QTY_MAX_ADD        = 10000;
   const QTY_MAX_SET        = 100000;
   const TITLE_MAX          = 200;
-  const IMAGE_HOSTS        = [ 'images.openfoodfacts.org', 'static.openfoodfacts.org' ];
-  const IMAGE_TIMEOUT      = 8;
+  const IMAGE_HOSTS        = Xophz_Compass_Bazaar_Barcode_Sources::IMAGE_HOSTS;
+  const IMAGE_BUDGET       = 15;
 
   /**
    * The Bazaar caps each action needs (any one of them). Read by
@@ -104,6 +116,7 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       'bazaar_quick_save'   => [ $c::MANAGE_STOCK, $c::MANAGE_CATALOG ],
       'bazaar_quick_undo'   => [ $c::MANAGE_STOCK, $c::MANAGE_CATALOG ],
       'bazaar_quick_recent' => [ $c::MANAGE_CATALOG, $c::MANAGE_STOCK, $c::RECEIVE ],
+      'bazaar_quick_image'  => [ $c::MANAGE_CATALOG, $c::MANAGE_STOCK, $c::RECEIVE ],
     ];
   }
 
@@ -213,6 +226,19 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
     self::respond( [ 'success' => true, 'today_count' => $count, 'items' => $items ] );
   }
 
+  /** AJAX bazaar_quick_image. */
+  public function quickImage() {
+    $this->authorize( 'bazaar_quick_image' );
+    $args = Xophz_Compass::get_input_json();
+    try {
+      $picture = Xophz_Compass_Bazaar_Barcode_Image::fetch( isset( $args->url ) && is_string( $args->url ) ? $args->url : '' );
+    } catch ( \Throwable $e ) {
+      error_log( 'bazaar_quick_image: ' . $e->getMessage() );
+      $picture = null;
+    }
+    self::respond( $picture ? [ 'success' => true ] + $picture : self::failure( 'no_picture', 'That picture could not be shown.' ) );
+  }
+
   /* ------------------------------------------------------------------ */
   /* Lookup                                                              */
   /* ------------------------------------------------------------------ */
@@ -247,14 +273,17 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
     if ( $code['valid'] ) {
       $found = Xophz_Compass_Bazaar_Admin::global_barcode_lookup( $code['normalized'] );
       if ( 'found' === $found['status'] && is_array( $found['product'] ) ) {
-        $p            = $found['product'];
+        $p      = $found['product'];
+        $images = Xophz_Compass_Bazaar_Barcode_Image::clean_list( $p['image_urls'] ?? [ $p['image_url'] ] );
         $out['draft'] = [
           'title'       => (string) $p['title'],
           'brand'       => (string) $p['brand'],
           'description' => (string) $p['description'],
-          'image_url'   => (string) $p['image_url'],
+          'image_url'   => $images[0] ?? '',
+          'image_urls'  => $images,
           'source'      => (string) $found['source'],
         ];
+        Xophz_Compass_Bazaar_Barcode_Image::remember_candidates( (int) get_current_user_id(), $code['normalized'], $images );
       }
       if ( is_array( $found['price_hint'] ) ) {
         $out['price_hint'] = $found['price_hint'];
@@ -409,8 +438,8 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       if ( '' === $title ) {
         return self::failure( 'title_required', 'A new item needs a short name.' );
       }
-      $image = self::allowed_image_url( $args->image_url ?? null );
-      return $this->apply_create( $barcode, $title, $price, $qty, $image, $uuid, $user_id );
+      $images = self::images_to_try( $args->image_url ?? null, $barcode, $user_id );
+      return $this->apply_create( $barcode, $title, $price, $qty, $images, $uuid, $user_id );
     }
 
     $product_id = isset( $args->product_id ) && is_numeric( $args->product_id ) ? (int) $args->product_id : 0;
@@ -473,7 +502,7 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
   }
 
   /** mode create: a new simple product, published, managing stock. */
-  private function apply_create( array $barcode, string $title, float $price, float $qty, ?string $image, string $uuid, int $user_id ): array {
+  private function apply_create( array $barcode, string $title, float $price, float $qty, array $images, string $uuid, int $user_id ): array {
     self::require_cap( Xophz_Compass_Bazaar_Security_Capabilities::MANAGE_CATALOG );
     self::require_cap( Xophz_Compass_Bazaar_Security_Capabilities::MANAGE_STOCK );
 
@@ -509,9 +538,7 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
     // client_uuid does not find (or duplicate) a half-made item.
     try {
       update_post_meta( $product_id, self::CREATED_META, time() );
-      if ( null !== $image ) {
-        self::sideload_image( $product_id, $image, $title );
-      }
+      $image = self::attach_first_image( $product_id, $images, $title );
       // Same path as saveProduct: save first, then write the quantity.
       Xophz_Compass_Bazaar_Admin_Product_Stock::set_quantity(
         $product_id,
@@ -538,8 +565,22 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       'product_id' => $product_id,
       'qty'        => $qty,
       'log_id'     => $log_id,
+      'memory'     => self::remember_created( $barcode, $product->get_name(), $image ),
     ] );
     return self::success( 'created', $product, null, $token );
+  }
+
+  /** Tell the Barcode_Memory about a saved create (never throws). @return array|null Its undo record. */
+  private static function remember_created( array $barcode, string $title, string $image ): ?array {
+    if ( ! $barcode['valid'] ) {
+      return null;
+    }
+    try {
+      return Xophz_Compass_Bazaar_Barcode_Memory::remember_store( $barcode['normalized'], $title, $image );
+    } catch ( \Throwable $e ) {
+      error_log( 'bazaar_quick_save: barcode memory not updated: ' . $e->getMessage() );
+      return null;
+    }
   }
 
   /**
@@ -653,6 +694,14 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       self::mark_undone( $user_id, (string) ( $data['log_id'] ?? '' ) );
     }
     $response = [ 'success' => true, 'action' => 'undone', 'product' => $product ? self::product_view( $product ) : null ];
+    if ( ! empty( $data['memory'] ) && is_array( $data['memory'] ) ) {
+      // The stock is already back: a failure here must not report the undo as failed.
+      try {
+        Xophz_Compass_Bazaar_Barcode_Memory::restore( $data['memory'] );
+      } catch ( \Throwable $e ) {
+        error_log( 'bazaar_quick_undo: barcode memory not restored: ' . $e->getMessage() );
+      }
+    }
     if ( ! empty( $data['pile_id'] ) ) {
       // The stock is already back: a failure here must not report the undo as failed.
       try {
@@ -1079,29 +1128,65 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
     return esc_url_raw( trim( $url ), [ 'https' ] );
   }
 
-  /** Download the image (8 s limit) and make it the product image. A failure leaves the product without one. */
-  private static function sideload_image( int $product_id, string $url, string $title ): void {
+  /**
+   * The pictures a create may try, the one asked for first: it must be from
+   * this user's last lookup of the code or on an Open*Facts host. No picture
+   * asked for (the suggestion was turned down) means none.
+   *
+   * @return string[]
+   */
+  private static function images_to_try( $asked, array $barcode, int $user_id ): array {
+    $url = Xophz_Compass_Bazaar_Barcode_Image::accept_url( $asked );
+    if ( '' === $url ) {
+      return [];
+    }
+    $found = Xophz_Compass_Bazaar_Barcode_Image::candidates( $user_id, $barcode['normalized'] );
+    if ( ! in_array( $url, $found, true ) && null === self::allowed_image_url( $url ) ) {
+      return [];
+    }
+    return array_values( array_unique( array_merge( [ $url ], $found ) ) );
+  }
+
+  /** Attach the first picture that works, within IMAGE_BUDGET seconds. Returns its URL, '' when none did. */
+  private static function attach_first_image( int $product_id, array $urls, string $title ): string {
+    $deadline = time() + self::IMAGE_BUDGET;
+    foreach ( $urls as $url ) {
+      if ( time() >= $deadline ) {
+        return '';
+      }
+      if ( self::sideload_image( $product_id, $url, $title ) ) {
+        return $url;
+      }
+    }
+    return '';
+  }
+
+  /** Fetch the picture and make it the product image. False leaves the product without one. */
+  private static function sideload_image( int $product_id, string $url, string $title ): bool {
+    $picture = Xophz_Compass_Bazaar_Barcode_Image::fetch( $url );
+    if ( null === $picture ) {
+      return false;
+    }
     require_once ABSPATH . 'wp-admin/includes/file.php';
     require_once ABSPATH . 'wp-admin/includes/media.php';
     require_once ABSPATH . 'wp-admin/includes/image.php';
-    $tmp = download_url( $url, self::IMAGE_TIMEOUT );
-    if ( is_wp_error( $tmp ) ) {
-      return;
+    $tmp = wp_tempnam( 'bazaar-quick-add' );
+    if ( ! $tmp ) {
+      return false;
     }
-    $name = basename( (string) wp_parse_url( $url, PHP_URL_PATH ) );
-    if ( ! preg_match( '/\.(jpe?g|png|webp|gif)$/i', $name ) ) {
-      $name .= '.jpg';
-    }
-    $attachment_id = media_handle_sideload( [ 'name' => sanitize_file_name( $name ), 'tmp_name' => $tmp ], $product_id, $title );
+    file_put_contents( $tmp, (string) base64_decode( $picture['data_base64'] ) );
+    $name = 'product-' . $product_id . '.' . Xophz_Compass_Bazaar_Barcode_Image::extension( $picture['mime'] );
+    $attachment_id = media_handle_sideload( [ 'name' => $name, 'tmp_name' => $tmp ], $product_id, $title );
     if ( is_wp_error( $attachment_id ) ) {
       if ( file_exists( $tmp ) ) {
         wp_delete_file( $tmp );
       }
-      return;
+      return false;
     }
     $product = self::fresh( $product_id );
     $product->set_image_id( (int) $attachment_id );
     $product->save();
+    return true;
   }
 
   /* ------------------------------------------------------------------ */
