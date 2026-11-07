@@ -145,12 +145,21 @@ add_action('template_redirect', function() {
     $date_created = $order->get_date_created();
     $date_str = $date_created ? $date_created->date('M d, Y, h:i A') : '';
     $items = $order->get_items();
-    $subtotal = 0;
-    foreach ($items as $item) {
-      $subtotal += $item->get_total();
-    }
-    $discounts = $order->get_total_discount();
-    $total = $order->get_total();
+    // Subtotal is before discounts, so the discount is taken off once, and the lines add up to the total.
+    $money = 'Xophz_Compass_Bazaar_Core_Money';
+    $total_minor = $money::to_minor(wc_format_decimal($order->get_total()));
+    $receipt_lines = Xophz_Compass_Bazaar_Checkout_Receipt_Lines::lines([
+      'subtotal' => $money::to_minor(wc_format_decimal($order->get_subtotal())),
+      'discount' => $money::to_minor(wc_format_decimal($order->get_total_discount())),
+      'fees'     => $money::to_minor(wc_format_decimal($order->get_total_fees())),
+      'shipping' => $money::to_minor(wc_format_decimal($order->get_shipping_total())),
+      'tax'      => $money::to_minor(wc_format_decimal($order->get_total_tax())),
+      'total'    => $total_minor,
+    ]);
+    $refund_lines = Xophz_Compass_Bazaar_Checkout_Receipt_Lines::refund_lines(
+      $total_minor,
+      $money::to_minor(wc_format_decimal($order->get_total_refunded()))
+    );
     $payment_method = $order->get_payment_method_title();
     
     $cashier_name = 'System';
@@ -367,21 +376,23 @@ add_action('template_redirect', function() {
         <div class="receipt-divider"></div>
 
         <div class="details-table">
-          <div class="flex-between mb-1">
-            <span>Subtotal</span>
-            <span>$<?php echo number_format($subtotal, 2); ?></span>
-          </div>
-          <?php if ($discounts > 0): ?>
+          <?php foreach ($receipt_lines as $line): ?>
             <div class="flex-between mb-1">
-              <span>Discounts</span>
-              <span>-$<?php echo number_format($discounts, 2); ?></span>
+              <span><?php echo esc_html($line['label']); ?></span>
+              <span><?php echo esc_html(Xophz_Compass_Bazaar_Checkout_Receipt_Lines::money($line['minor'])); ?></span>
             </div>
-          <?php endif; ?>
+          <?php endforeach; ?>
           <div class="receipt-divider"></div>
           <div class="flex-between font-bold total-row">
             <span>Total</span>
-            <span>$<?php echo number_format($total, 2); ?></span>
+            <span><?php echo esc_html(Xophz_Compass_Bazaar_Checkout_Receipt_Lines::money($total_minor)); ?></span>
           </div>
+          <?php foreach ($refund_lines as $line): ?>
+            <div class="flex-between mb-1">
+              <span><?php echo esc_html($line['label']); ?></span>
+              <span><?php echo esc_html(Xophz_Compass_Bazaar_Checkout_Receipt_Lines::money($line['minor'])); ?></span>
+            </div>
+          <?php endforeach; ?>
         </div>
 
         <div class="receipt-divider"></div>

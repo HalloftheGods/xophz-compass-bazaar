@@ -16,7 +16,7 @@ class Xophz_Compass_Bazaar_Core_Modules {
   /** Booted with $plugin->define_class_hooks( $class ). */
   const ADMIN_HANDLERS = [
     'Admin_Pos_Sale', 'Admin_Pos_Customers', 'Admin_Pos_Shift', 'Admin_Pos_Refunds',
-    'Admin_Coupons', 'Admin_Payment_Settings', 'Admin_Test_Portal', 'Admin_Categories',
+    'Admin_Coupons', 'Admin_Payment_Settings', 'Admin_Test_Portal', 'Admin_Categories', 'Admin_Pos_Lookup',
   ];
 
   /** Booted with (new $class())->register_routes() on rest_api_init. */

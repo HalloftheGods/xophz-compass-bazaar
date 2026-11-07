@@ -2,6 +2,29 @@
 
 All notable changes to the Compass Bazaar plugin. Newest first.
 
+## 2026-11-07 (pre-launch polish)
+
+### Added
+- **`bazaar_pos_lookup`** (`bazaar_sell`): the POS finds a scanned code through `Barcode::normalize` and Quick Add's `find_existing`, so short UPC-E and EAN-8 codes match. `Security_Policy` maps 66 actions.
+- POS scan not found: an error tone, a vibration and "We don't have that item yet", with Type the price and Add it now. Quick Add opens with `?code=`.
+- Editor: tags, seven allowlisted SEO fields, `remove_image`, and a found picture attached on save. "Leave without saving?" guards unsaved changes.
+- Fulfillment: `is_paid` on each order, a "NOT PAID YET" chip, and a confirm sheet before Picked up or Delivered.
+- Procurement: each line links to a real product, and Dispatch is blocked until all are linked.
+- Quick Add: a way out on every item screen, Android Back steps one screen, a leave prompt, and a refresh screen when the login has expired.
+
+### Changed
+- `get_products` keeps only page, limit, category, type, stock_status, search and filters. The toolbar filters live in the store and survive paging.
+- Fulfillment: only paid orders can be marked Ready. Picked up and Delivered accept processing and ready-pickup orders.
+- Quick Add remembers a save for 24 hours (was 10 minutes), reads product codes only (no QR), and keeps an unsettled save through Start over until the page is reloaded.
+
+### Fixed
+- Product search: an apostrophe no longer breaks the query, title and SKU searches are prepared, and no match shows nothing instead of the whole catalog.
+- Receipts: discounts were subtracted twice. There is now a Sales tax line, plus fees and refunds when they apply.
+- Add Product no longer opens with the last product's details.
+- An emptied SKU now clears, and the Stats page reads the right part of the response.
+- Procurement shows the server's own success or error message.
+- The Yearly Sales and Orders Grid links that opened the product grid are gone.
+
 ## 2026-11-07
 
 ### Added

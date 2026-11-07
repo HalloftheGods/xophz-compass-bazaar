@@ -64,6 +64,15 @@ check( 'post status: listed in admin', $post_statuses['wc-ready-pickup']['show_i
 check( 'post status key fits the 20-char limit', strlen( 'wc-ready-pickup' ) <= 20, true );
 check( 'paid statuses: added once', $F->addPaidStatus( $F->addPaidStatus( [ 'processing', 'completed' ] ) ), [ 'processing', 'completed', 'ready-pickup' ] );
 
+// Only paid orders can be handed over
+check( 'ready: processing allowed', $F::can_mark_ready( 'processing' ), true );
+check( 'ready: on-hold refused', $F::can_mark_ready( 'on-hold' ), false );
+check( 'ready: already ready refused', $F::can_mark_ready( 'ready-pickup' ), false );
+check( 'complete: processing allowed', $F::can_complete( 'processing' ), true );
+check( 'complete: ready-pickup allowed', $F::can_complete( 'ready-pickup' ), true );
+check( 'complete: on-hold refused', $F::can_complete( 'on-hold' ), false );
+check( 'complete: pending refused', $F::can_complete( 'pending' ), false );
+
 // POS digital payment authorization (#6783)
 $A = 'Xophz_Compass_Bazaar_Pos_Authorization';
 check( 'tender: cash needs no authorization', $A::requires_authorization( 'cash' ), false );

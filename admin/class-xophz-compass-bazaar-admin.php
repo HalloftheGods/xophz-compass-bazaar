@@ -98,23 +98,9 @@ class Xophz_Compass_Bazaar_Admin {
     ));
   }
 
+  /** get_products: see Xophz_Compass_Bazaar_Admin_Product_Query. */
   public function getProducts(){
-    $args = Xophz_Compass::get_input_json();
-    if (!$args) $args = new stdClass();
-    
-    $wc_products = Xophz_Compass_Bazaar_Admin::getProductIds( $args );
-    
-    if (!$wc_products) {
-       Xophz_Compass::output_json(['total_count' => 0, 'data' => []]);
-       return;
-    }
-
-    $products = Xophz_Compass_Bazaar_Admin::getProductsDataByIds( isset($wc_products->products) ? $wc_products->products : [] );
-
-    Xophz_Compass::output_json([
-      'total_count' => isset($wc_products->total) ? $wc_products->total : 0,
-      'data' => $products
-    ]);
+    (new Xophz_Compass_Bazaar_Admin_Product_Query())->list_products();
   }
 
   public function saveProduct() {
@@ -154,7 +140,8 @@ class Xophz_Compass_Bazaar_Admin {
       } else {
         $product->set_sale_price('');
       }
-      if (isset($args->sku) && !empty($args->sku)) {
+      // isset, not !empty: an emptied SKU field has to clear the SKU.
+      if (isset($args->sku)) {
         $product->set_sku(sanitize_text_field($args->sku));
       }
       
@@ -166,6 +153,10 @@ class Xophz_Compass_Bazaar_Admin {
         if (is_array($cat_ids)) {
           $product->set_category_ids(array_map('intval', array_filter($cat_ids)));
         }
+      }
+
+      if (!empty($args->remove_image)) {
+        $product->set_image_id(0);
       }
 
       // Handle Image Assignment (from Media Library) or Upload (from base64)
@@ -204,6 +195,19 @@ class Xophz_Compass_Bazaar_Admin {
       
       $product_id = $product->save();
 
+      if ($product_id) {
+        $image_failed = self::attach_lookup_image($product_id, $args);
+        // Like category_ids, a form post sends the list as a JSON string.
+        $tag_list = isset($args->tags) && is_string($args->tags) ? json_decode($args->tags, true) : ($args->tags ?? null);
+        if (is_array($tag_list)) {
+          $tags = array_values(array_unique(array_filter(array_map('sanitize_text_field', array_map('strval', array_filter($tag_list, 'is_scalar'))))));
+          wp_set_object_terms($product_id, $tags, 'product_tag');
+        }
+        if (isset($args->meta)) {
+          Xophz_Compass_Bazaar_Admin_Product_Seo::save($product_id, $args->meta);
+        }
+      }
+
       if ($product_id && null !== $stock_quantity) {
         Xophz_Compass_Bazaar_Admin_Product_Stock::set_quantity(
           $product_id,
@@ -216,6 +220,9 @@ class Xophz_Compass_Bazaar_Admin {
       if ($product_id) {
         $products = Xophz_Compass_Bazaar_Admin::getProductsDataByIds([$product_id]);
         $response = ['success' => true, 'product' => isset($products[0]) ? $products[0] : null];
+        if (!empty($image_failed)) {
+          $response['image_error'] = 'The product was saved, but its picture could not be fetched.';
+        }
       } else {
         $response = ['success' => false, 'message' => 'Failed to save product'];
       }
@@ -223,6 +230,32 @@ class Xophz_Compass_Bazaar_Admin {
       $response = ['success' => false, 'message' => $e->getMessage()];
     }
     Xophz_Compass::output_json($response);
+  }
+
+  /**
+   * Attach the picture a barcode lookup found, when the editor asks for it and
+   * no other image was given. The URL must be one this user's last lookup of
+   * the code offered. Returns true when it was asked for and did not attach.
+   */
+  private static function attach_lookup_image(int $product_id, $args): bool {
+    if (empty($args->image_url) || !empty($args->image_id) || !empty($args->image_data)) {
+      return false;
+    }
+    $url  = Xophz_Compass_Bazaar_Barcode_Image::accept_url($args->image_url);
+    $code = Xophz_Compass_Bazaar_Barcode::normalize(isset($args->barcode) && is_scalar($args->barcode) ? sanitize_text_field((string) $args->barcode) : '');
+    $code = '' !== $code['normalized'] ? $code['normalized'] : $code['raw'];
+    if ('' === $url || '' === $code
+      || !in_array($url, Xophz_Compass_Bazaar_Barcode_Image::candidates((int) get_current_user_id(), $code), true)) {
+      return true;
+    }
+    $product = wc_get_product($product_id);
+    $attachment_id = $product ? Xophz_Compass_Bazaar_Barcode_Image::sideload($product_id, $url, $product->get_name()) : 0;
+    if ($attachment_id < 1) {
+      return true;
+    }
+    $product->set_image_id($attachment_id);
+    $product->save();
+    return false;
   }
 
   /** bazaar_import_products_csv: see Xophz_Compass_Bazaar_Admin_Product_Import. */
@@ -252,6 +285,17 @@ class Xophz_Compass_Bazaar_Admin {
 
       $found = self::global_barcode_lookup($barcode);
 
+      if ('found' === $found['status'] && !empty($found['product']['title'])) {
+        // Same as Quick Add: a save may attach only a picture this lookup offered.
+        $code   = Xophz_Compass_Bazaar_Barcode::normalize($barcode);
+        $images = Xophz_Compass_Bazaar_Barcode_Image::clean_list($found['product']['image_urls'] ?? [$found['product']['image_url']]);
+        Xophz_Compass_Bazaar_Barcode_Image::remember_candidates(
+          (int) get_current_user_id(),
+          '' !== $code['normalized'] ? $code['normalized'] : $code['raw'],
+          $images
+        );
+      }
+
       if ('found' !== $found['status'] || empty($found['product']['title'])) {
         Xophz_Compass::output_json([
           'success' => false,
@@ -268,7 +312,8 @@ class Xophz_Compass_Bazaar_Admin {
           'brand' => $p['brand'],
           'description' => $p['description'],
           'category' => $p['category'],
-          'image_url' => $p['image_url'],
+          'image_url' => $images[0] ?? '',
+          'image_urls' => $images,
           'barcode' => $barcode
         ]
       ]);
@@ -392,90 +437,19 @@ class Xophz_Compass_Bazaar_Admin {
     (new Xophz_Compass_Bazaar_Admin_Product_Stock())->update();
   }
 
+  /** get_products_stats: see Xophz_Compass_Bazaar_Admin_Product_Query. */
   public function getProductsStats(){
-    $args = Xophz_Compass::get_input_json();
-
-    $args->paginate = false;
-    $args->limit = -1;
-
-    $wc_products = Xophz_Compass_Bazaar_Admin::getPostIdsBySku( $args->filters->sku ); 
-
-    $unique_in_stock = 0;
-    $stock_value = 0;
-    $total_stock = 0;
-    $in_stock_value = 0;
-    $avg_discount = 0;
-    $est_discount = 0;
-    $total_sales = 0;
-    $est_sales = 0;
-
-    foreach($wc_products as $product_id){
-      $product = wc_get_product($product_id);
-      if (!$product) continue;
-
-      $price = $product->get_price();
-
-      if ( $product->managing_stock() && $product->is_in_stock() ){
-        $unique_in_stock++;
-        $total_stock += $product->get_stock_quantity();
-        $in_stock_value += ( $product->get_stock_quantity() * $price );
-      }
-      
-      $total_sales += $product->get_total_sales();
-
-      unset($product);
-    }
-
-    Xophz_Compass::output_json([
-      'data' => [
-        'ids' => $wc_products,
-        'total_stock' => $total_stock,
-        'unique_stock' => count($wc_products),
-        'unique_in_stock' => $unique_in_stock,
-        'in_stock_value' => $in_stock_value,
-        'avg_discount'  => $avg_discount,
-        'est_discount'  => $est_discount,
-        'total_sales'   => $total_sales,
-        'est_sales'     => $est_sales 
-      ] 
-    ]);
+    (new Xophz_Compass_Bazaar_Admin_Product_Query())->stats();
   }
 
-  public static function getProductIds($args){
-    $posts = (!empty($args->filters)) 
-      ? Xophz_Compass_Bazaar_Admin::getPostIdsByFilters( $args->filters ) : [];
-
-    $default = [
-      'include'   => !empty($posts)  ? $posts : '',
-      'return'    => 'ids',
-      'paginate'  => true
-    ];
-
-    $args_array = (array) $args;
-    if (isset($args_array['category']) && is_string($args_array['category'])) {
-        $args_array['category'] = [$args_array['category']];
-    }
-
-    if ( ! function_exists( 'wc_get_products' ) ) {
-        return (object) [ 'products' => [], 'total' => 0, 'max_num_pages' => 0 ];
-    }
-
-    return wc_get_products( array_merge($default, $args_array) );
-  } 
-
   public static function getProductsDataByIds($ids){
-    $products = [];
-    foreach($ids as $id){
-      $p = wc_get_product($id);
-      if (!$p) continue;
-      $data = $p->get_data();
-      $data['thumb'] = wp_get_attachment_image_url( $p->get_image_id() );
-      $data['image'] = $p->get_image();
-      $data['title'] = $p->get_name();
-      $data['stock'] = $p->get_stock_quantity();
-      $products[] = $data;
-    }
-    return $products;
+    // The editor reads these back: thumb is a URL or '', plus tag names and the SEO fields.
+    return array_map( function ( $row ) {
+      $row['thumb'] = is_string( $row['thumb'] ?? false ) ? $row['thumb'] : '';
+      $row['tags']  = wc_get_product_terms( (int) $row['id'], 'product_tag', [ 'fields' => 'names' ] );
+      $row['meta']  = Xophz_Compass_Bazaar_Admin_Product_Seo::read( (int) $row['id'] );
+      return $row;
+    }, Xophz_Compass_Bazaar_Admin_Product_Query::rows( $ids ) );
   }
 
   public function getProductsStatsOld($Products){
@@ -504,43 +478,5 @@ class Xophz_Compass_Bazaar_Admin {
     ];
   }
 
-  public static function getPostIdsByTitle($title){
-    global $wpdb;
-    return $wpdb->get_col("
-      SELECT id FROM {$wpdb->posts}  
-      WHERE (post_title LIKE '%".$wpdb->esc_like( $title )."%')
-    ");
-  }
 
-  public static function getPostIdsBySku($sku){
-    global $wpdb;
-    return $wpdb->get_col("
-      SELECT post_id FROM {$wpdb->postmeta}  
-      WHERE (meta_key='_sku' AND meta_value LIKE '".$wpdb->esc_like( $sku )."%')
-    ");
-  }
-
-  public static function getProductIdsByPostIds($ids){
-    $productIds = [];
-    foreach($ids as $id){
-      array_push($productIds, wc_get_product($id)->get_parent_id());
-    }
-    return $productIds;
-  }
-
-  public static function getPostIdsByFilters($filters){
-    $posts = [];
-    $postIdsByTitle = $postIdsBySku = $productIdsByPostIds = [];
-
-    if($filters->title){
-      $postIdsByTitle = Xophz_Compass_Bazaar_Admin::getPostIdsByTitle( $filters->title );
-    }
-
-    if($filters->sku){
-      $postIdsBySku = Xophz_Compass_Bazaar_Admin::getPostIdsBySku( $filters->sku );
-      $productIdsByPostIds = Xophz_Compass_Bazaar_Admin::getProductIdsByPostIds( $postIdsBySku );
-    }
-
-    return array_merge($productIdsByPostIds, $postIdsByTitle, $postIdsBySku); 
-  }
 }

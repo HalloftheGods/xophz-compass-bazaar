@@ -126,6 +126,36 @@ class Xophz_Compass_Bazaar_Barcode_Image {
     return [ 'image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp' ][ $mime ] ?? '';
   }
 
+  /**
+   * Fetch the picture at a URL and add it to the media library, attached to a
+   * product. Does not make it the product image.
+   *
+   * @return int The attachment id, 0 when the picture could not be fetched or stored.
+   */
+  public static function sideload( int $product_id, string $url, string $title ): int {
+    $picture = self::fetch( $url );
+    if ( null === $picture ) {
+      return 0;
+    }
+    require_once ABSPATH . 'wp-admin/includes/file.php';
+    require_once ABSPATH . 'wp-admin/includes/media.php';
+    require_once ABSPATH . 'wp-admin/includes/image.php';
+    $tmp = wp_tempnam( 'bazaar-picture' );
+    if ( ! $tmp ) {
+      return 0;
+    }
+    file_put_contents( $tmp, (string) base64_decode( $picture['data_base64'] ) );
+    $name          = 'product-' . $product_id . '.' . self::extension( $picture['mime'] );
+    $attachment_id = media_handle_sideload( [ 'name' => $name, 'tmp_name' => $tmp ], $product_id, $title );
+    if ( is_wp_error( $attachment_id ) ) {
+      if ( file_exists( $tmp ) ) {
+        wp_delete_file( $tmp );
+      }
+      return 0;
+    }
+    return (int) $attachment_id;
+  }
+
   /** Keep what a lookup offered, so a save can be held to it. */
   public static function remember_candidates( int $user_id, string $code, array $urls ): void {
     set_transient( self::lookup_key( $user_id, $code ), self::clean_list( $urls ), self::LOOKUP_TTL );

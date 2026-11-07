@@ -41,6 +41,7 @@ class Xophz_Compass_Bazaar_Security_Policy {
     'update_order_status'                => [ 'bazaar_manage_orders' ],
     'create_pos_order'                   => [ 'bazaar_sell' ],
     'validate_pos_coupon'                => [ 'bazaar_sell' ],
+    'bazaar_pos_lookup'                  => [ 'bazaar_sell' ],
     'send_pos_receipt'                   => [ 'bazaar_sell' ],
     'get_pos_customers'                  => [ 'bazaar_sell' ],
     'email_shift_summary'                => [ 'bazaar_sell' ],

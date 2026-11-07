@@ -26,6 +26,8 @@ $qp_policy = $QP::policy();
 
 // A pile scan kept on a phone may be resent days later: it must still count once.
 check( 'quick add: pile add remembers a client_uuid for at least 7 days', $QP::IDEMPOTENCY_TTL >= 7 * 86400, true );
+// A save with no answer may be settled hours later, after the phone is back online.
+check( 'quick add: save remembers a client_uuid for 24 hours', $QA::IDEMPOTENCY_TTL, 86400 );
 
 foreach ( [ $QA, $QP ] as $qa_class ) {
   $qa_module        = new $qa_class( 'xophz-compass-bazaar', 'test' );

@@ -35,9 +35,11 @@
  *   so a failed save leaves nothing behind.
  * - All four actions are mapped for the Bazaar Security_Guard through
  *   policy() (see Security_Guard::MODULE_POLICIES).
- * - A save is applied at most once per user and client_uuid within 10
- *   minutes: a repeat returns the stored result. Only successes are stored,
- *   so "Try again" with the same client_uuid re-runs a failed save.
+ * - A save is applied at most once per user and client_uuid within 24
+ *   hours: a repeat returns the stored result. A save with no answer stays
+ *   on the phone, so the repeat can come long after the first try. Only
+ *   successes are stored, so "Try again" with the same client_uuid re-runs
+ *   a failed save.
  * - A create attaches a picture only from this user's last lookup of the
  *   code, or an Open*Facts host, trying each in turn for at most
  *   IMAGE_BUDGET seconds; no picture still saves the item.
@@ -79,7 +81,7 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
   ];
 
   const MODES              = [ 'add', 'create', 'set' ];
-  const IDEMPOTENCY_TTL    = 600;
+  const IDEMPOTENCY_TTL    = 86400; // 24 hours (a literal: unit tests load this class without WordPress).
   const IDEM_PREFIX        = 'bazaar_qa_idem_';
   const LOCK_PREFIX        = 'bazaar_qa_lock_';
   const UNDO_TTL           = 900;
@@ -1163,28 +1165,12 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
 
   /** Fetch the picture and make it the product image. False leaves the product without one. */
   private static function sideload_image( int $product_id, string $url, string $title ): bool {
-    $picture = Xophz_Compass_Bazaar_Barcode_Image::fetch( $url );
-    if ( null === $picture ) {
-      return false;
-    }
-    require_once ABSPATH . 'wp-admin/includes/file.php';
-    require_once ABSPATH . 'wp-admin/includes/media.php';
-    require_once ABSPATH . 'wp-admin/includes/image.php';
-    $tmp = wp_tempnam( 'bazaar-quick-add' );
-    if ( ! $tmp ) {
-      return false;
-    }
-    file_put_contents( $tmp, (string) base64_decode( $picture['data_base64'] ) );
-    $name = 'product-' . $product_id . '.' . Xophz_Compass_Bazaar_Barcode_Image::extension( $picture['mime'] );
-    $attachment_id = media_handle_sideload( [ 'name' => $name, 'tmp_name' => $tmp ], $product_id, $title );
-    if ( is_wp_error( $attachment_id ) ) {
-      if ( file_exists( $tmp ) ) {
-        wp_delete_file( $tmp );
-      }
+    $attachment_id = Xophz_Compass_Bazaar_Barcode_Image::sideload( $product_id, $url, $title );
+    if ( $attachment_id < 1 ) {
       return false;
     }
     $product = self::fresh( $product_id );
-    $product->set_image_id( (int) $attachment_id );
+    $product->set_image_id( $attachment_id );
     $product->save();
     return true;
   }

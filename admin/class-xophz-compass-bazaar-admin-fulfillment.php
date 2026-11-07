@@ -17,6 +17,9 @@ class Xophz_Compass_Bazaar_Admin_Fulfillment {
   const OPEN_STATUSES   = [ 'processing', 'on-hold', self::STATUS_READY ];
   const PICKUP_METHODS  = [ 'local_pickup', 'pickup_location' ];
   const MAX_OPEN_ORDERS = 500;
+  // Only paid orders may be handed over: on-hold means payment has not cleared.
+  const READY_FROM      = [ 'processing' ];
+  const COMPLETE_FROM   = [ 'processing', self::STATUS_READY ];
 
   private $plugin_name;
   private $version;
@@ -89,6 +92,16 @@ class Xophz_Compass_Bazaar_Admin_Fulfillment {
     return $statuses;
   }
 
+  /** Whether an order in this status may be marked ready for pickup. */
+  public static function can_mark_ready( $status ): bool {
+    return in_array( $status, self::READY_FROM, true );
+  }
+
+  /** Whether an order in this status may be marked picked up or delivered. */
+  public static function can_complete( $status ): bool {
+    return in_array( $status, self::COMPLETE_FROM, true );
+  }
+
   /**
    * Open web orders for the board.
    *
@@ -132,6 +145,7 @@ class Xophz_Compass_Bazaar_Admin_Fulfillment {
         $data = Xophz_Compass_Bazaar_Admin_Orders::map_order_data( $order );
         if ( $data ) {
           $data['fulfillment'] = $fulfillment;
+          $data['is_paid']     = $order->is_paid();
           $rows[] = $data;
         }
       }
@@ -167,8 +181,8 @@ class Xophz_Compass_Bazaar_Admin_Fulfillment {
         $this->send_json_response( [ 'success' => false, 'message' => $order ] );
         return;
       }
-      if ( ! in_array( $order->get_status(), [ 'processing', 'on-hold' ], true ) ) {
-        $this->send_json_response( [ 'success' => false, 'message' => 'Only processing or on-hold orders can be marked ready for pickup.' ] );
+      if ( ! self::can_mark_ready( $order->get_status() ) ) {
+        $this->send_json_response( [ 'success' => false, 'message' => 'This order is not paid yet, so it cannot be marked ready for pickup.' ] );
         return;
       }
 
@@ -210,8 +224,8 @@ class Xophz_Compass_Bazaar_Admin_Fulfillment {
         $this->send_json_response( [ 'success' => false, 'message' => $order ] );
         return;
       }
-      if ( ! in_array( $order->get_status(), self::OPEN_STATUSES, true ) ) {
-        $this->send_json_response( [ 'success' => false, 'message' => 'This order is not waiting for fulfillment.' ] );
+      if ( ! self::can_complete( $order->get_status() ) ) {
+        $this->send_json_response( [ 'success' => false, 'message' => 'This order is not paid yet, or is not waiting for fulfillment.' ] );
         return;
       }
 

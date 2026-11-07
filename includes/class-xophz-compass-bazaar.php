@@ -166,6 +166,7 @@ class Xophz_Compass_Bazaar extends Xophz_Compass_Plugin_Base {
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-bazaar-admin-fulfillment.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/class-xophz-compass-bazaar-sale-pricing.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-bazaar-admin-promotions.php';
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-bazaar-admin-product-query.php';
 
     /**
       * Quick Add: barcode helpers (pure) and the phone-first add/restock handlers

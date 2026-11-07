@@ -66,7 +66,7 @@ expect 'legacy map: administrator gets bazaar_manage_settings from manage_woocom
 
 ACTIONS="$(wp_eval "echo implode(',', array_keys(${P}_Security_Policy::AJAX));" | tail -1)"
 IFS=',' read -r -a ACTION_LIST <<<"$ACTIONS"
-expect_equal 'policy: 65 actions' "${#ACTION_LIST[@]}" '65'
+expect_equal 'policy: 66 actions' "${#ACTION_LIST[@]}" '66'
 
 # Throwaway users, deleted on exit.
 SUFFIX="$(date +%s)$RANDOM"
@@ -124,7 +124,7 @@ out="$(ajax_all -e CALL_USER=admin)"
 for a in "${ACTION_LIST[@]}"; do expect "administrator: $a allowed" "$(body "$out" "$a")" "$ALLOWED"; done
 
 # bazaar_cashier holds read, bazaar_sell, bazaar_discount and bazaar_refund (spec 6.2, 6.3).
-CASHIER_ALLOWED=" get_products bazaar_lookup_barcode create_pos_order validate_pos_coupon send_pos_receipt get_pos_customers email_shift_summary get_payment_gateways bazaar_pos_gateway_portal bazaar_pos_authorize_test_payment get_categories get_pos_order_for_refund process_pos_refund bazaar_get_bank_details bazaar_get_inventory_locations "
+CASHIER_ALLOWED=" get_products bazaar_lookup_barcode bazaar_pos_lookup create_pos_order validate_pos_coupon send_pos_receipt get_pos_customers email_shift_summary get_payment_gateways bazaar_pos_gateway_portal bazaar_pos_authorize_test_payment get_categories get_pos_order_for_refund process_pos_refund bazaar_get_bank_details bazaar_get_inventory_locations "
 out="$(ajax_all -e CALL_USER="id:$CASH_ID")"
 for a in "${ACTION_LIST[@]}"; do
   if [[ "$CASHIER_ALLOWED" == *" $a "* ]]; then
