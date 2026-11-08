@@ -123,8 +123,9 @@ add_action('template_redirect', function() {
     if (!$order) {
       wp_die('Order not found.', 'Receipt Error', ['response' => 404]);
     }
-    $provided_key = isset($_GET['key']) ? sanitize_text_field($_GET['key']) : '';
-    if ($provided_key !== $order->get_order_key()) {
+    $provided_key = isset($_GET['key']) ? sanitize_text_field(wp_unslash($_GET['key'])) : '';
+    $order_key    = (string) $order->get_order_key();
+    if ('' === $order_key || !hash_equals($order_key, $provided_key)) {
       wp_die('Access denied. Invalid receipt key.', 'Access Denied', ['response' => 403]);
     }
     $site_name = get_bloginfo('name');
@@ -172,22 +173,40 @@ add_action('template_redirect', function() {
     }
     
     $site_description = get_bloginfo('description');
+    $store = Xophz_Compass_Bazaar_Checkout_Receipt_Store::info();
 
-    $self_url = home_url('/?xophz_bazaar_receipt=' . $order_id . '&key=' . $order->get_order_key());
-    $qr_api_url = 'https://api.qrserver.com/v1/create-qr-code/?size=100&data=' . urlencode($self_url);
+    // Cash handed over and change, from the live payment rows; card sales and old orders have none.
+    $cash_rows = [];
+    if (class_exists('Xophz_Compass_Bazaar_Payments_Repository')) {
+      try {
+        foreach (Xophz_Compass_Bazaar_Payments_Repository::for_order($order_id) as $pay) {
+          if (in_array($pay->status, Xophz_Compass_Bazaar_Payments_Repository::COUNTED_STATUSES, true)) {
+            $cash_rows[] = (array) $pay;
+          }
+        }
+      } catch (Throwable $e) {
+        $cash_rows = [];
+      }
+    }
+    $cash_lines = Xophz_Compass_Bazaar_Checkout_Receipt_Lines::cash_lines($cash_rows);
+
+    // The code is drawn here, so printing a receipt never calls another site.
+    $self_url = home_url('/?xophz_bazaar_receipt=' . $order_id . '&key=' . $order_key);
+    $qr_svg = Xophz_Compass_Bazaar_Checkout_Qr::svg($self_url);
+    $qr_src = '' === $qr_svg ? '' : 'data:image/svg+xml;base64,' . base64_encode($qr_svg);
     ?>
     <!DOCTYPE html>
     <html lang="en">
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Receipt #<?php echo $order_id; ?> - <?php echo esc_html($site_name); ?></title>
-      <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+      <title>Receipt #<?php echo (int) $order_id; ?> - <?php echo esc_html($site_name); ?></title>
       <style>
         body {
           background: #f4f4f6;
           color: #111111;
           font-family: 'Courier New', Courier, monospace;
+          font-size: 16px;
           margin: 0;
           padding: 20px;
           display: flex;
@@ -198,7 +217,7 @@ add_action('template_redirect', function() {
         .receipt-container {
           background: #ffffff;
           width: 100%;
-          max-width: 80mm;
+          max-width: 420px;
           padding: 20px;
           box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
           border-radius: 4px;
@@ -217,20 +236,15 @@ add_action('template_redirect', function() {
           margin: 0 auto 8px auto;
           display: block;
         }
-        .receipt-logo-fallback {
-          font-size: 32px;
-          color: #333;
-          margin-bottom: 8px;
-        }
         .title {
-          font-size: 18px;
+          font-size: 20px;
           font-weight: bold;
           text-transform: uppercase;
           letter-spacing: 1px;
         }
         .subtitle {
-          font-size: 11px;
-          color: #666;
+          font-size: 14px;
+          color: #444;
         }
         .receipt-divider {
           border-top: 1px dashed rgba(0, 0, 0, 0.2);
@@ -240,7 +254,7 @@ add_action('template_redirect', function() {
         .details-table, .items-table {
           width: 100%;
           border-collapse: collapse;
-          font-size: 12px;
+          font-size: 16px;
         }
         .details-table td {
           padding: 2px 0;
@@ -260,7 +274,7 @@ add_action('template_redirect', function() {
         }
         .font-bold { font-weight: bold; }
         .total-row {
-          font-size: 16px;
+          font-size: 20px;
           margin-top: 8px;
         }
         .qr-container {
@@ -270,14 +284,14 @@ add_action('template_redirect', function() {
           align-items: center;
         }
         .qr-img {
-          width: 100px;
-          height: 100px;
+          width: 120px;
+          height: 120px;
           display: block;
           margin-bottom: 6px;
         }
         .qr-label {
-          font-size: 9px;
-          color: #666;
+          font-size: 14px;
+          color: #444;
           text-transform: uppercase;
           letter-spacing: 0.5px;
         }
@@ -289,12 +303,14 @@ add_action('template_redirect', function() {
           background: #111111;
           color: #ffffff;
           border: none;
-          padding: 10px 16px;
+          min-height: 48px;
+          min-width: 120px;
+          padding: 0 24px;
           border-radius: 50px;
           font-family: inherit;
           cursor: pointer;
           box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
-          font-size: 12px;
+          font-size: 16px;
           display: flex;
           align-items: center;
           gap: 6px;
@@ -325,10 +341,14 @@ add_action('template_redirect', function() {
         <div class="text-center mb-4">
           <?php if ($site_icon_url && $site_icon_url !== '/favicon.ico'): ?>
             <img src="<?php echo esc_url($site_icon_url); ?>" class="receipt-logo" alt="Logo">
-          <?php else: ?>
-            <div class="receipt-logo-fallback"><i class="fas fa-store"></i></div>
           <?php endif; ?>
           <div class="title"><?php echo esc_html($site_name); ?></div>
+          <?php foreach ($store['address_lines'] as $address_line): ?>
+            <div class="subtitle"><?php echo esc_html($address_line); ?></div>
+          <?php endforeach; ?>
+          <?php if ('' !== $store['phone']): ?>
+            <div class="subtitle"><?php echo esc_html($store['phone']); ?></div>
+          <?php endif; ?>
           <div class="subtitle">Cashier: <?php echo esc_html($cashier_name); ?></div>
         </div>
 
@@ -337,7 +357,7 @@ add_action('template_redirect', function() {
         <table class="details-table">
           <tr>
             <td>Order ID:</td>
-            <td class="text-right font-bold">#<?php echo $order_id; ?></td>
+            <td class="text-right font-bold">#<?php echo (int) $order_id; ?></td>
           </tr>
           <tr>
             <td>Date:</td>
@@ -362,12 +382,17 @@ add_action('template_redirect', function() {
             <?php foreach ($items as $item): 
               $product = $item->get_product();
               $name = $item->get_name();
-              $qty = $item->get_quantity();
-              $line_total = $item->get_total();
+              $qty = (string) $item->get_quantity();
+              $line_total = $money::to_minor(wc_format_decimal($item->get_total()));
+              // Unit price is before discounts; the right-hand figure is what was paid for the line.
+              $unit = $money::to_minor(wc_format_decimal((float) $item->get_subtotal() / max((float) $qty, 1)));
             ?>
               <tr>
-                <td><?php echo esc_html($name); ?> <span class="subtitle">x<?php echo $qty; ?></span></td>
-                <td class="text-right font-bold">$<?php echo number_format($line_total, 2); ?></td>
+                <td>
+                  <?php echo esc_html($name); ?>
+                  <div class="subtitle"><?php echo esc_html(Xophz_Compass_Bazaar_Checkout_Receipt_Lines::item_detail($qty, $unit)); ?></div>
+                </td>
+                <td class="text-right font-bold"><?php echo esc_html(Xophz_Compass_Bazaar_Checkout_Receipt_Lines::money($line_total)); ?></td>
               </tr>
             <?php endforeach; ?>
           </tbody>
@@ -387,6 +412,12 @@ add_action('template_redirect', function() {
             <span>Total</span>
             <span><?php echo esc_html(Xophz_Compass_Bazaar_Checkout_Receipt_Lines::money($total_minor)); ?></span>
           </div>
+          <?php foreach ($cash_lines as $line): ?>
+            <div class="flex-between mb-1">
+              <span><?php echo esc_html($line['label']); ?></span>
+              <span><?php echo esc_html(Xophz_Compass_Bazaar_Checkout_Receipt_Lines::money($line['minor'])); ?></span>
+            </div>
+          <?php endforeach; ?>
           <?php foreach ($refund_lines as $line): ?>
             <div class="flex-between mb-1">
               <span><?php echo esc_html($line['label']); ?></span>
@@ -397,10 +428,16 @@ add_action('template_redirect', function() {
 
         <div class="receipt-divider"></div>
 
-        <div class="qr-container text-center">
-          <img src="<?php echo esc_url($qr_api_url); ?>" class="qr-img" alt="Receipt QR">
-          <span class="qr-label">w4 Quick Scan</span>
-        </div>
+        <?php if ('' !== $qr_src): ?>
+          <div class="qr-container text-center">
+            <img src="<?php echo esc_attr($qr_src); ?>" class="qr-img" alt="Receipt QR code">
+            <span class="qr-label">w4 Quick Scan</span>
+          </div>
+        <?php endif; ?>
+
+        <?php if ('' !== $store['policy']): ?>
+          <div class="text-center subtitle" style="margin-top: 15px;"><?php echo nl2br(esc_html($store['policy'])); ?></div>
+        <?php endif; ?>
 
         <div class="text-center mt-3 subtitle italic" style="margin-top: 15px;">
           Thank you for shopping at <?php echo esc_html($site_name); ?>!
@@ -410,7 +447,7 @@ add_action('template_redirect', function() {
         </div>
       </div>
 
-      <button class="print-btn" onclick="window.print()"><i class="fas fa-print"></i> Print</button>
+      <button class="print-btn" onclick="window.print()">Print</button>
     </body>
     </html>
     <?php

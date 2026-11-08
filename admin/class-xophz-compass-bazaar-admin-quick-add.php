@@ -43,6 +43,10 @@
  * - A create attaches a picture only from this user's last lookup of the
  *   code, or an Open*Facts host, trying each in turn for at most
  *   IMAGE_BUDGET seconds; no picture still saves the item.
+ * - A create with a valid code fills the long and short description (and an
+ *   existing store category) from this server's own lookup of the code, see
+ *   Admin_Product_Details. Text from the request is never used; a lookup that
+ *   fails or is slow still saves the item, with no description.
  * - A create with a shareable code also goes in the Barcode_Memory, so other
  *   stores on this install can name the item (never its price or stock). An
  *   undo of that create takes the memory row back to how it was. A failure
@@ -531,7 +535,8 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
         // chemx-allow: the SKU already holds the code; a refused global id (taken or malformed) is not worth failing the save.
       }
     }
-    $product_id = (int) $product->save();
+    $description = self::describe_new( $product, $barcode );
+    $product_id  = (int) $product->save();
     if ( $product_id <= 0 ) {
       return self::failure( 'failed', "That didn't save. Nothing was lost." );
     }
@@ -567,18 +572,35 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       'product_id' => $product_id,
       'qty'        => $qty,
       'log_id'     => $log_id,
-      'memory'     => self::remember_created( $barcode, $product->get_name(), $image ),
+      'memory'     => self::remember_created( $barcode, $product->get_name(), $image, $description ),
     ] );
     return self::success( 'created', $product, null, $token );
   }
 
+  /**
+   * Fill the descriptions and category of a product not yet saved from the
+   * server's lookup of its code (never throws: no details is a fine answer).
+   *
+   * @return string The long description written, '' when none.
+   */
+  private static function describe_new( WC_Product $product, array $barcode ): string {
+    try {
+      $answer  = Xophz_Compass_Bazaar_Admin_Product_Details::details_for( $barcode );
+      $written = Xophz_Compass_Bazaar_Admin_Product_Details::fill_new_product( $product, $answer['details'] );
+      return (string) ( $written['description'] ?? '' );
+    } catch ( \Throwable $e ) {
+      error_log( 'bazaar_quick_save: no details for the new item: ' . $e->getMessage() );
+      return '';
+    }
+  }
+
   /** Tell the Barcode_Memory about a saved create (never throws). @return array|null Its undo record. */
-  private static function remember_created( array $barcode, string $title, string $image ): ?array {
+  private static function remember_created( array $barcode, string $title, string $image, string $description = '' ): ?array {
     if ( ! $barcode['valid'] ) {
       return null;
     }
     try {
-      return Xophz_Compass_Bazaar_Barcode_Memory::remember_store( $barcode['normalized'], $title, $image );
+      return Xophz_Compass_Bazaar_Barcode_Memory::remember_store( $barcode['normalized'], $title, $image, $description );
     } catch ( \Throwable $e ) {
       error_log( 'bazaar_quick_save: barcode memory not updated: ' . $e->getMessage() );
       return null;

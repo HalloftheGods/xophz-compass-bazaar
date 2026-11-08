@@ -92,7 +92,27 @@ out="$(quick bazaar_quick_undo "{\"undo_token\":\"$(token_of "$out")\"}")"
 expect 'create over a provider row: undone' "$out" '"action":"undone"'
 expect_equal 'undo: the snapshot is back' "$(step row)" "$before"
 
-step clear >/dev/null
+# Descriptions: a create fills them from this site's cached lookup, never from the request.
+step details-seed >/dev/null
+evil="${save/UUID/$RANDOM$RANDOM}"
+out="$(quick bazaar_quick_save "${evil/\"quantity\"/\"description\":\"EVIL FROM THE PHONE\",\"quantity\"}")"
+expect 'details: create saved' "$out" '"action":"created"'
+state="$(step details-state)"
+echo "$state"
+expect 'details: long description is the lookup text, tags and money out' "$state" "description='Soft graphite pencil for paper and wood'"
+expect 'details: short description filled' "$state" "short='Soft graphite pencil for paper and wood'"
+if grep -qF "EVIL FROM THE PHONE" <<<"$state"; then
+  FAIL=$((FAIL + 1))
+  echo 'FAIL details: the phone text was used'
+else
+  PASS=$((PASS + 1))
+fi
+expect 'details: the memory row keeps the public description' "$state" "memory_description='Soft graphite pencil for paper and wood'"
+out="$(quick bazaar_quick_undo "{\"undo_token\":\"$(token_of "$out")\"}")"
+expect 'details: undone' "$out" '"action":"undone"'
+expect 'details: undo takes the memory row away' "$(step row)" "row='absent'"
+
+step undo-cleanup >/dev/null
 
 # Pictures: a UPCitemdb item shows through the proxy and attaches on save.
 step picture-clear >/dev/null

@@ -22,6 +22,11 @@ class Xophz_Compass_Bazaar_Security_Policy {
     'update_product_stock'               => [ 'bazaar_manage_stock' ],
     'save_product'                       => [ 'bazaar_manage_catalog' ],
     'bazaar_import_products_csv'         => [ 'bazaar_manage_catalog' ],
+    'bazaar_trash_product'               => [ 'bazaar_manage_catalog' ],
+    'bazaar_restore_product'             => [ 'bazaar_manage_catalog' ],
+    'bazaar_list_trashed_products'       => [ 'bazaar_manage_catalog' ],
+    'bazaar_delete_product_permanently'  => [ 'bazaar_manage_catalog' ],
+    'bazaar_fill_descriptions'           => [ 'bazaar_manage_catalog' ],
 
     // Quick Add (same caps, same order as Admin_Quick_Add::policy())
     'bazaar_quick_lookup'                => [ 'bazaar_manage_catalog', 'bazaar_manage_stock', 'bazaar_receive' ],
@@ -41,7 +46,7 @@ class Xophz_Compass_Bazaar_Security_Policy {
     'update_order_status'                => [ 'bazaar_manage_orders' ],
     'create_pos_order'                   => [ 'bazaar_sell' ],
     'validate_pos_coupon'                => [ 'bazaar_sell' ],
-    'bazaar_pos_lookup'                  => [ 'bazaar_sell' ],
+    'bazaar_pos_lookup'                  => [ 'bazaar_sell', 'bazaar_manage_catalog', 'bazaar_manage_stock' ],
     'send_pos_receipt'                   => [ 'bazaar_sell' ],
     'get_pos_customers'                  => [ 'bazaar_sell' ],
     'email_shift_summary'                => [ 'bazaar_sell' ],

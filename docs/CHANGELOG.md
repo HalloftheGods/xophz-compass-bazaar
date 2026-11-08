@@ -2,6 +2,26 @@
 
 All notable changes to the Compass Bazaar plugin. Newest first.
 
+## 2026-11-08 (pre-launch polish, batch 2)
+
+### Added
+- **Phone editor**: a full-screen sheet with a Cancel and Save bar, a tab bar, grouped sections and a plain text box with a Format button. Special markup is read-only on phones.
+- **Delete products**: swipe, three-dots menu, editor button and a desktop row action. `bazaar_trash_product` and `bazaar_restore_product` move an item to the Trash behind a confirm sheet, with an 8 second Undo, and refuse items with open orders. Nothing is trashed when WordPress has no Trash.
+- **Recently deleted**: a list of trashed products with Restore. `bazaar_list_trashed_products` and `bazaar_delete_product_permanently` (Delete forever, behind a second confirm, refused for a product on any order). `Security_Policy` maps 71 actions.
+- **Quick Add details**: a create fills the long and short description and a matching existing category from the server's own lookup, never from the phone. The memory table gains `description` (version 26.11.07.2). `bazaar_fill_descriptions` is a manual, batched backfill that stops at a rate limit.
+- **Product list**: debounced search, a scan button, phone cards with stock buttons, error and empty states, and Export CSV. `bazaar_pos_lookup` also accepts catalog and stock managers, with `include_hidden` for drafts.
+- **POS**: continuous scanning with a 1.5 second repeat guard, a running total, type-the-number on camera failure, and a USB scan caught in the search box.
+- **Editor**: Take photo, a Saved message, inline errors, and lookups that fill only empty fields.
+- **Pickup board**: polling every 60 seconds, a New order alert, Try again, a store chip and a Shipping tab.
+- **Scan a pile**: "+ One more" on the newest row and a hint after an ignored repeat scan.
+- **Receipt**: store details, quantity times unit price, tender and change, and a local QR code. New blank-by-default options `xophz_bazaar_store_phone` and `xophz_bazaar_return_policy`.
+
+### Changed
+- `saveProduct` keeps prices that were not sent, and `image_data` keeps its real type and extension.
+- Inventory CSV uses location 0 and reports skipped rows. The Stats payload drops `avg_discount`, `est_discount` and `est_sales`.
+- "Emailed" is said only when the Customer note email is on; otherwise the toast offers a tap-to-call number.
+- The receipt key check uses `hash_equals`.
+
 ## 2026-11-07 (pre-launch polish)
 
 ### Added

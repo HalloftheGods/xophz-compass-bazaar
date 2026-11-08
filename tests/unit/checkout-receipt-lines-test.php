@@ -51,4 +51,15 @@ check( 'refund: Refunded and Net after refund', array_column( $f, 'minor', 'key'
 check( 'money: positive', $R::money( 450 ), '$4.50' );
 check( 'money: negative', $R::money( -450 ), '-$4.50' );
 
+// Quantity and unit price.
+check( 'detail: whole quantity', $R::item_detail( '2', 300 ), '2 x $3.00' );
+check( 'detail: ten keeps its zero', $R::item_detail( '10', 150 ), '10 x $1.50' );
+check( 'detail: weighed quantity', $R::item_detail( '1.50', 400 ), '1.5 x $4.00' );
+
+// Cash tendered and change.
+check( 'cash: card sale has none', $R::cash_lines( [ [ 'tendered_minor' => null, 'change_minor' => null ] ] ), [] );
+check( 'cash: no rows has none', $R::cash_lines( [] ), [] );
+$g = $R::cash_lines( [ [ 'tendered_minor' => '2000', 'change_minor' => '56' ] ] );
+check( 'cash: tendered and change', array_column( $g, 'minor', 'key' ), [ 'tendered' => 2000, 'change' => 56 ] );
+
 bazaar_test_standalone( __FILE__ );

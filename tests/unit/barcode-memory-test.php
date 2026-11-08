@@ -9,6 +9,7 @@
 require_once dirname( __DIR__ ) . '/support/harness.php';
 require_once dirname( __DIR__, 2 ) . '/includes/class-xophz-compass-bazaar-barcode.php';
 require_once dirname( __DIR__, 2 ) . '/includes/class-xophz-compass-bazaar-barcode-sources.php';
+require_once dirname( __DIR__, 2 ) . '/includes/class-xophz-compass-bazaar-barcode-details.php';
 require_once dirname( __DIR__, 2 ) . '/includes/class-xophz-compass-bazaar-barcode-memory.php';
 require_once dirname( __DIR__, 2 ) . '/includes/class-xophz-compass-bazaar-barcode-image.php';
 
@@ -214,8 +215,8 @@ check( 'image: too long refused', $M::clean_image( 'https://images.openfoodfacts
 check( 'image: not a string', $M::clean_image( null ), '' );
 
 // A read shows public identity only.
-$row = [ 'code' => '1', 'title' => 'T', 'brand' => 'B', 'image_url' => 'I', 'source' => 'store', 'title_owner' => 'abc', 'hits' => 2, 'created_at' => 'x', 'updated_at' => 'y' ];
-check( 'view: public fields only', $M::view( $row ), [ 'title' => 'T', 'brand' => 'B', 'image_url' => 'I', 'source' => 'store' ] );
+$row = [ 'code' => '1', 'title' => 'T', 'brand' => 'B', 'description' => 'D', 'image_url' => 'I', 'source' => 'store', 'title_owner' => 'abc', 'hits' => 2, 'created_at' => 'x', 'updated_at' => 'y' ];
+check( 'view: public fields only', $M::view( $row ), [ 'title' => 'T', 'brand' => 'B', 'description' => 'D', 'image_url' => 'I', 'source' => 'store' ] );
 check( 'view: no row', $M::view( null ), null );
 
 // The SQL: one statement, and assignments in the order MySQL needs.
@@ -225,8 +226,8 @@ $at  = function ( string $needle ) use ( $sql ): int {
   return false === $found ? -1 : $found;
 };
 check( 'sql: one upsert', substr_count( $sql, 'ON DUPLICATE KEY UPDATE' ), 1 );
-check( 'sql: eight placeholders', substr_count( $sql, '%s' ), 8 );
-$order = [ ' title = IF(', ' brand = IF(', ' image_url = IF(', ' title_owner = IF(', ' hits = hits + 1', ' updated_at = VALUES', ' source = IF(' ];
+check( 'sql: nine placeholders', substr_count( $sql, '%s' ), 9 );
+$order = [ ' title = IF(', ' brand = IF(', ' description = IF(', ' image_url = IF(', ' title_owner = IF(', ' hits = hits + 1', ' updated_at = VALUES', ' source = IF(' ];
 foreach ( $order as $needle ) {
   check( "sql: has$needle", $at( $needle ) > 0, true );
 }
@@ -238,6 +239,8 @@ check( 'sql: source is the last assignment', substr( $sql, -strlen( $last ) ), $
 check( 'sql: a store title stays with its owner', false !== strpos( $sql, "title = IF(source = 'store' AND title_owner <> VALUES(title_owner), title, VALUES(title))" ), true );
 check( 'sql: brand is only filled', false !== strpos( $sql, "brand = IF(brand = '', VALUES(brand), brand)" ), true );
 check( 'sql: picture is only filled', false !== strpos( $sql, "image_url = IF(image_url = '', VALUES(image_url), image_url)" ), true );
+check( 'sql: description is only filled', false !== strpos( $sql, "description = IF(description = '', VALUES(description), description)" ), true );
+check( 'sql: insert columns match the placeholders', false !== strpos( $sql, '(code, title, brand, description, image_url, source, title_owner, hits, created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, 1, %s, %s)' ), true );
 
 // Table.
 $create = $M::definition( 'wp_bazaar_barcode_memory', 'DEFAULT CHARSET=utf8mb4' );

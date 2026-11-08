@@ -130,15 +130,12 @@ class Xophz_Compass_Bazaar_Admin {
       if (isset($args->short_description)) {
         $product->set_short_description(wp_kses_post($args->short_description));
       }
-      if (isset($args->regular_price) && $args->regular_price !== '') {
-        $product->set_regular_price(wc_format_decimal($args->regular_price));
-      } else {
-        $product->set_regular_price('');
+      // A price that was not sent stays as it is; one sent empty clears it.
+      if (isset($args->regular_price)) {
+        $product->set_regular_price($args->regular_price !== '' ? wc_format_decimal($args->regular_price) : '');
       }
-      if (isset($args->sale_price) && $args->sale_price !== '') {
-        $product->set_sale_price(wc_format_decimal($args->sale_price));
-      } else {
-        $product->set_sale_price('');
+      if (isset($args->sale_price)) {
+        $product->set_sale_price($args->sale_price !== '' ? wc_format_decimal($args->sale_price) : '');
       }
       // isset, not !empty: an emptied SKU field has to clear the SKU.
       if (isset($args->sku)) {
@@ -163,29 +160,11 @@ class Xophz_Compass_Bazaar_Admin {
       if (!empty($args->image_id)) {
         $product->set_image_id(intval($args->image_id));
       } else if (!empty($args->image_data)) {
-        $upload_dir = wp_upload_dir();
-        $image_data = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $args->image_data));
-        if ($image_data) {
-          $filename = 'product-image-' . time() . '.png';
-          $file_path = $upload_dir['path'] . '/' . $filename;
-          
-          file_put_contents($file_path, $image_data);
-          
-          $wp_filetype = wp_check_filetype($filename, null);
-          $attachment = array(
-              'post_mime_type' => $wp_filetype['type'],
-              'post_title'     => sanitize_file_name($filename),
-              'post_content'   => '',
-              'post_status'    => 'inherit'
-          );
-          
-          $attach_id = wp_insert_attachment($attachment, $file_path);
-          if ($attach_id && !is_wp_error($attach_id)) {
-            require_once(ABSPATH . 'wp-admin/includes/image.php');
-            $attach_data = wp_generate_attachment_metadata($attach_id, $file_path);
-            wp_update_attachment_metadata($attach_id, $attach_data);
-            $product->set_image_id($attach_id);
-          }
+        $upload_id = self::store_uploaded_image((string) $args->image_data);
+        if ($upload_id > 0) {
+          $product->set_image_id($upload_id);
+        } else {
+          $upload_failed = true;
         }
       }
 
@@ -220,7 +199,7 @@ class Xophz_Compass_Bazaar_Admin {
       if ($product_id) {
         $products = Xophz_Compass_Bazaar_Admin::getProductsDataByIds([$product_id]);
         $response = ['success' => true, 'product' => isset($products[0]) ? $products[0] : null];
-        if (!empty($image_failed)) {
+        if (!empty($image_failed) || !empty($upload_failed)) {
           $response['image_error'] = 'The product was saved, but its picture could not be fetched.';
         }
       } else {
@@ -230,6 +209,50 @@ class Xophz_Compass_Bazaar_Admin {
       $response = ['success' => false, 'message' => $e->getMessage()];
     }
     Xophz_Compass::output_json($response);
+  }
+
+  /**
+   * Save a base64 picture from the editor (a photo or an upload) to the media
+   * library. The type comes from the bytes, not from the data URL's claim, and
+   * the file keeps its real extension. Returns the attachment id, 0 when the
+   * data is not a JPEG, PNG, WebP or GIF.
+   */
+  private static function store_uploaded_image(string $data): int {
+    $bytes = base64_decode(preg_replace('#^data:image/[\w.+-]+;base64,#i', '', $data), true);
+    if (!$bytes) {
+      return 0;
+    }
+    $extensions = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp', 'image/gif' => 'gif'];
+    $tmp = wp_tempnam('product-image');
+    if (!$tmp) {
+      return 0;
+    }
+    file_put_contents($tmp, $bytes);
+    $mime = wp_get_image_mime($tmp);
+    if (!$mime || !isset($extensions[$mime])) {
+      wp_delete_file($tmp);
+      return 0;
+    }
+    $upload_dir = wp_upload_dir();
+    $filename   = wp_unique_filename($upload_dir['path'], 'product-image-' . time() . '.' . $extensions[$mime]);
+    $file_path  = $upload_dir['path'] . '/' . $filename;
+    $moved      = @copy($tmp, $file_path);
+    wp_delete_file($tmp);
+    if (!$moved) {
+      return 0;
+    }
+    $attach_id = wp_insert_attachment([
+      'post_mime_type' => $mime,
+      'post_title'     => sanitize_file_name($filename),
+      'post_content'   => '',
+      'post_status'    => 'inherit',
+    ], $file_path);
+    if (!$attach_id || is_wp_error($attach_id)) {
+      return 0;
+    }
+    require_once(ABSPATH . 'wp-admin/includes/image.php');
+    wp_update_attachment_metadata($attach_id, wp_generate_attachment_metadata($attach_id, $file_path));
+    return (int) $attach_id;
   }
 
   /**
@@ -340,13 +363,20 @@ class Xophz_Compass_Bazaar_Admin {
    * A code a provider found also goes in the memory, unless it may not be
    * shared (see Barcode::is_shared_gtin).
    *
+   * A memory row may have no description (rows from before the column, or a
+   * provider with none). Its description then comes from this site's cached
+   * outcome when there is one, with no HTTP call. With $need_description a
+   * memory hit that still has none falls through to the cache and then the
+   * providers, so the answer can be filled in and the memory learns it.
+   *
    * @param string $barcode As scanned or typed.
+   * @param bool   $need_description Ask on past a memory hit that has no description.
    * @return array{status:string,source:string,product:?array,price_hint:?array,cached:bool}
    *   status: 'found', 'not_found', 'rate_limited' or 'error'.
    *   product: title, brand, description, category, image_url (strings).
    *   price_hint: low, high (strings with 2 decimals), source.
    */
-  public static function global_barcode_lookup(string $barcode): array {
+  public static function global_barcode_lookup(string $barcode, bool $need_description = false): array {
     $code = Xophz_Compass_Bazaar_Barcode::normalize($barcode);
     $query = '' !== $code['normalized'] ? $code['normalized'] : $code['raw'];
     $empty = ['status' => 'not_found', 'source' => '', 'product' => null, 'price_hint' => null, 'cached' => false];
@@ -354,23 +384,26 @@ class Xophz_Compass_Bazaar_Admin {
       return $empty;
     }
 
+    $cache_key = self::LOOKUP_CACHE_PREFIX . md5($query);
     $memory = Xophz_Compass_Bazaar_Barcode_Memory::find($query);
     if (null !== $memory) {
-      return array_merge($empty, [
-        'status' => 'found',
-        'source' => 'memory',
-        'product' => [
-          'title' => $memory['title'],
-          'brand' => $memory['brand'],
-          'description' => '',
-          'category' => '',
-          'image_url' => $memory['image_url'],
-          'image_urls' => '' !== $memory['image_url'] ? [$memory['image_url']] : [],
-        ],
-      ]);
+      $description = '' !== (string) ($memory['description'] ?? '') ? (string) $memory['description'] : self::cached_description($cache_key);
+      if ('' !== $description || !$need_description) {
+        return array_merge($empty, [
+          'status' => 'found',
+          'source' => 'memory',
+          'product' => [
+            'title' => $memory['title'],
+            'brand' => $memory['brand'],
+            'description' => $description,
+            'category' => '',
+            'image_url' => $memory['image_url'],
+            'image_urls' => '' !== $memory['image_url'] ? [$memory['image_url']] : [],
+          ],
+        ]);
+      }
     }
 
-    $cache_key = self::LOOKUP_CACHE_PREFIX . md5($query);
     $cached = get_transient($cache_key);
     if (is_array($cached) && isset($cached['status'])) {
       $cached['cached'] = true;
@@ -390,6 +423,13 @@ class Xophz_Compass_Bazaar_Admin {
       Xophz_Compass_Bazaar_Barcode_Memory::remember_provider($query, $result['product']);
     }
     return $result;
+  }
+
+  /** The description in this site's cached outcome for a code ('' when none is cached). */
+  private static function cached_description(string $cache_key): string {
+    $cached = get_transient($cache_key);
+    $product = is_array($cached) && is_array($cached['product'] ?? null) ? $cached['product'] : [];
+    return Xophz_Compass_Bazaar_Barcode_Memory::clean_description($product['description'] ?? '');
   }
 
   /** Ask each provider in turn until one finds the code. @return array One merged outcome. */

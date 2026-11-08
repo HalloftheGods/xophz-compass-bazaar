@@ -67,6 +67,43 @@ class Xophz_Compass_Bazaar_Checkout_Receipt_Lines {
     ];
   }
 
+  /**
+   * Quantity and unit price for a line: "2 x $3.00". The quantity can be a
+   * decimal (weighed goods); a whole one shows without ".0".
+   */
+  public static function item_detail( string $qty, int $unit_minor ): string {
+    $shown = false !== strpos( $qty, '.' ) ? rtrim( rtrim( $qty, '0' ), '.' ) : $qty;
+    return ( '' === $shown ? '0' : $shown ) . ' x ' . self::money( $unit_minor );
+  }
+
+  /**
+   * Cash handed over and change given back, from the cash payment rows of an
+   * order (tendered_minor and change_minor). Empty when no row carries a
+   * tendered amount, as with card sales and orders from before payments rows.
+   *
+   * @param array<int,array{tendered_minor:mixed,change_minor:mixed}> $rows
+   * @return array<int,array{key:string,label:string,minor:int}>
+   */
+  public static function cash_lines( array $rows ): array {
+    $tendered = 0;
+    $change   = 0;
+    $found    = false;
+    foreach ( $rows as $row ) {
+      if ( isset( $row['tendered_minor'] ) ) {
+        $found     = true;
+        $tendered += (int) $row['tendered_minor'];
+        $change   += (int) ( $row['change_minor'] ?? 0 );
+      }
+    }
+    if ( ! $found ) {
+      return [];
+    }
+    return [
+      [ 'key' => 'tendered', 'label' => 'Cash tendered', 'minor' => $tendered ],
+      [ 'key' => 'change', 'label' => 'Change', 'minor' => $change ],
+    ];
+  }
+
   /** A signed minor amount as text: $4.50 or -$4.50. */
   public static function money( int $minor ): string {
     $text = Xophz_Compass_Bazaar_Core_Money::from_minor( abs( $minor ) );

@@ -16,6 +16,8 @@ class Xophz_Compass_Bazaar_Admin_Fulfillment {
   const STATUS_READY    = 'ready-pickup';
   const OPEN_STATUSES   = [ 'processing', 'on-hold', self::STATUS_READY ];
   const PICKUP_METHODS  = [ 'local_pickup', 'pickup_location' ];
+  // A driver brings these to the door; any other shipping method is mailed by a carrier.
+  const DELIVERY_METHODS = [ 'local_delivery' ];
   const MAX_OPEN_ORDERS = 500;
   // Only paid orders may be handed over: on-hold means payment has not cleared.
   const READY_FROM      = [ 'processing' ];
@@ -118,7 +120,7 @@ class Xophz_Compass_Bazaar_Admin_Fulfillment {
       }
 
       $args  = Xophz_Compass::get_input_json();
-      $tab   = 'delivery' === ( $args->tab ?? '' ) ? 'delivery' : 'pickup';
+      $tab   = self::read_tab( $args->tab ?? '' );
       $page  = max( 1, intval( $args->page ?? 1 ) );
       $limit = min( 100, max( 1, intval( $args->limit ?? 25 ) ) );
 
@@ -131,7 +133,7 @@ class Xophz_Compass_Bazaar_Admin_Fulfillment {
         'return'  => 'objects',
       ] );
 
-      $by_tab = [ 'pickup' => [], 'delivery' => [] ];
+      $by_tab = [ 'pickup' => [], 'delivery' => [], 'shipping' => [] ];
       foreach ( $orders as $order ) {
         if ( ! $order instanceof WC_Order || 'bazaar_pos' === $order->get_created_via() ) {
           continue;
@@ -156,7 +158,11 @@ class Xophz_Compass_Bazaar_Admin_Fulfillment {
         'page'      => $page,
         'limit'     => $limit,
         'total'     => count( $by_tab[ $tab ] ),
-        'counts'    => [ 'pickup' => count( $by_tab['pickup'] ), 'delivery' => count( $by_tab['delivery'] ) ],
+        'counts'    => [
+          'pickup'   => count( $by_tab['pickup'] ),
+          'delivery' => count( $by_tab['delivery'] ),
+          'shipping' => count( $by_tab['shipping'] ),
+        ],
         'truncated' => count( $orders ) >= self::MAX_OPEN_ORDERS,
         'data'      => $rows,
       ] );
@@ -231,7 +237,7 @@ class Xophz_Compass_Bazaar_Admin_Fulfillment {
 
       $note = 'pickup' === $this->describe_fulfillment( $order )['type']
         ? __( 'Picked up by the customer (COMPASS Bazaar).', 'xophz-compass-bazaar' )
-        : __( 'Delivered (COMPASS Bazaar).', 'xophz-compass-bazaar' );
+        : __( 'Delivered or shipped (COMPASS Bazaar).', 'xophz-compass-bazaar' );
       $order->update_status( 'completed', $note );
 
       $this->send_json_response( [
@@ -267,21 +273,69 @@ class Xophz_Compass_Bazaar_Admin_Fulfillment {
   private function describe_fulfillment( WC_Order $order ): array {
     $titles   = [];
     $location = '';
-    $type     = 'delivery';
+    $methods  = [];
 
     foreach ( $order->get_shipping_methods() as $item ) {
-      $titles[] = $item->get_method_title();
+      $titles[]  = $item->get_method_title();
+      $methods[] = [ 'id' => (string) $item->get_method_id(), 'title' => (string) $item->get_method_title() ];
       if ( in_array( $item->get_method_id(), self::PICKUP_METHODS, true ) ) {
-        $type     = 'pickup';
         $location = (string) ( $item->get_meta( 'pickup_location' ) ?: $item->get_meta( 'pickup_address' ) );
       }
     }
 
     return [
-      'type'            => $type,
+      'type'            => self::classify( $methods ),
       'shipping_method' => implode( ', ', array_filter( $titles ) ),
       'pickup_location' => $location,
     ];
+  }
+
+  /** The tab asked for; anything unknown is the pickup tab. */
+  public static function read_tab( $value ): string {
+    return in_array( $value, [ 'delivery', 'shipping' ], true ) ? (string) $value : 'pickup';
+  }
+
+  /**
+   * Pickup, local delivery or carrier shipping, from an order's shipping
+   * methods (each: id, title). Pickup wins, then delivery: a method whose id
+   * is local_delivery or whose title says "delivery" (stores often name a flat
+   * rate that way). Everything else, including no method, is shipping.
+   *
+   * @param array<int,array{id:string,title:string}> $methods
+   */
+  public static function classify( array $methods ): string {
+    $type = 'shipping';
+    foreach ( $methods as $method ) {
+      $id = (string) ( $method['id'] ?? '' );
+      if ( in_array( $id, self::PICKUP_METHODS, true ) ) {
+        return 'pickup';
+      }
+      if ( in_array( $id, self::DELIVERY_METHODS, true ) || false !== stripos( (string) ( $method['title'] ?? '' ), 'deliver' ) ) {
+        $type = 'delivery';
+      }
+    }
+    return $type;
+  }
+
+  /**
+   * Whether WooCommerce's "Customer note" email is switched on, from its saved
+   * settings (woocommerce_customer_note_settings). WooCommerce ships it on, so
+   * settings that were never saved count as on; only an explicit "no" is off.
+   */
+  public static function customer_note_email_enabled( $settings ): bool {
+    $enabled = is_array( $settings ) ? ( $settings['enabled'] ?? 'yes' ) : 'yes';
+    return 'yes' === $enabled;
+  }
+
+  /** The live answer from WooCommerce's own email object, else from the saved settings. */
+  private function customer_note_email_is_on(): bool {
+    if ( function_exists( 'WC' ) && WC() && WC()->mailer() ) {
+      $emails = WC()->mailer()->get_emails();
+      if ( isset( $emails['WC_Email_Customer_Note'] ) ) {
+        return (bool) $emails['WC_Email_Customer_Note']->is_enabled();
+      }
+    }
+    return self::customer_note_email_enabled( get_option( 'woocommerce_customer_note_settings', [] ) );
   }
 
   /**
@@ -304,15 +358,25 @@ class Xophz_Compass_Bazaar_Admin_Fulfillment {
     }
 
     $order->add_order_note( Xophz_Compass_Bazaar_Twilio::pickup_ready_message( $order ), 1 );
-    $email = $order->get_billing_email();
+    $email = (string) $order->get_billing_email();
 
+    if ( '' !== $email && $this->customer_note_email_is_on() ) {
+      return [
+        'channel'   => 'email',
+        'sent'      => true,
+        'message'   => 'Customer note added; WooCommerce emails it to ' . $email . '.',
+        'sms_error' => $sms_error,
+        'phone'     => (string) $phone,
+      ];
+    }
+
+    // Nothing will reach the customer by itself: hand back the number so staff can call.
     return [
-      'channel'   => 'email',
-      'sent'      => '' !== (string) $email,
-      'message'   => $email
-        ? 'Customer note added; WooCommerce emails it to ' . $email . '.'
-        : 'Customer note added; the order has no email address.',
+      'channel'   => 'none',
+      'sent'      => false,
+      'message'   => '' === $email ? 'The customer was not emailed: the order has no email address.' : 'The customer was not emailed: the Customer note email is turned off in WooCommerce.',
       'sms_error' => $sms_error,
+      'phone'     => (string) $phone,
     ];
   }
 }

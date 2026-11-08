@@ -1,7 +1,7 @@
 <?php
 /**
  * Security_Policy coverage: the policy keys equal every quoted 'wp_ajax_…'
- * key in admin/*.php and the orchestrator (66), and every policy cap is a
+ * key in admin/*.php and the orchestrator (69), and every policy cap is a
  * Bazaar cap. Also pins the signed-off defaults (spec section 2 and 6.3).
  */
 require_once dirname( __DIR__ ) . '/support/harness.php';
@@ -30,8 +30,8 @@ sort( $bazaar_scanned );
 $bazaar_policy = array_keys( $SP::AJAX );
 sort( $bazaar_policy );
 
-check( 'policy: the scan finds 66 distinct actions', count( $bazaar_scanned ), 66 );
-check( 'policy: 66 actions in the policy', count( $SP::AJAX ), 66 );
+check( 'policy: the scan finds 71 distinct actions', count( $bazaar_scanned ), 71 );
+check( 'policy: 71 actions in the policy', count( $SP::AJAX ), 71 );
 check( 'policy: registered actions missing from the policy', array_values( array_diff( $bazaar_scanned, $bazaar_policy ) ), [] );
 check( 'policy: policy actions no longer registered', array_values( array_diff( $bazaar_policy, $bazaar_scanned ) ), [] );
 check( 'policy: keys have no wp_ajax_ prefix', array_values( array_filter( $bazaar_policy, function ( $a ) {
@@ -106,6 +106,8 @@ check( 'sign-off: reading bank details stays open to sell', in_array( 'bazaar_se
 foreach ( [ 'bazaar_save_inventory_location', 'bazaar_delete_inventory_location', 'bazaar_save_product_inventories', 'bazaar_bulk_update_inventory_stock', 'bazaar_import_inventory_csv' ] as $action ) {
   check( "sign-off: $action needs manage_stock", $SP::AJAX[ $action ], [ 'bazaar_manage_stock' ] );
 }
+check( 'policy: filling descriptions needs catalog rights', $SP::AJAX['bazaar_fill_descriptions'], [ 'bazaar_manage_catalog' ] );
 check( 'policy: receive_po needs receive', $SP::AJAX['bazaar_receive_po'], [ 'bazaar_receive' ] );
+check( 'policy: the product list scan (pos_lookup) is open to sellers, catalog and stock managers', $SP::AJAX['bazaar_pos_lookup'], [ 'bazaar_sell', 'bazaar_manage_catalog', 'bazaar_manage_stock' ] );
 
 bazaar_test_standalone( __FILE__ );

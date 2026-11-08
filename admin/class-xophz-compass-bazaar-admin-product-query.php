@@ -9,7 +9,8 @@
  * Guarantees:
  * - Only page, limit, category, type, stock_status, search and filters reach
  *   wc_get_products; anything else in the request body is ignored.
- * - Title and SKU searches use $wpdb->prepare, so an apostrophe is safe.
+ * - Title and SKU searches use $wpdb->prepare, so an apostrophe is safe. A
+ *   `search` term is both: a title match or a SKU that starts with it.
  * - A search that matches nothing answers total 0 and no rows (never the
  *   whole catalog).
  *
@@ -25,13 +26,14 @@ class Xophz_Compass_Bazaar_Admin_Product_Query {
 
   const STOCK_STATUSES = [ 'instock', 'outofstock', 'onbackorder' ];
 
-  /** AJAX: get_products. Answers {total_count, data}. */
+  /** AJAX: get_products. Answers {total_count, data, trash_days}; a delete sheet words its promise from trash_days. */
   public function list_products() {
     $result = self::query( self::clean_args( Xophz_Compass::get_input_json() ) );
 
     Xophz_Compass::output_json( [
       'total_count' => isset( $result->total ) ? (int) $result->total : 0,
       'data'        => self::rows( isset( $result->products ) ? $result->products : [] ),
+      'trash_days'  => Xophz_Compass_Bazaar_Admin_Product_Trash::trash_days(),
     ] );
   }
 
@@ -69,10 +71,7 @@ class Xophz_Compass_Bazaar_Admin_Product_Query {
         'unique_stock'    => count( $ids ),
         'unique_in_stock' => $unique_in_stock,
         'in_stock_value'  => $in_stock_value,
-        'avg_discount'    => 0,
-        'est_discount'    => 0,
         'total_sales'     => $total_sales,
-        'est_sales'       => 0,
       ],
     ] );
   }
@@ -87,10 +86,13 @@ class Xophz_Compass_Bazaar_Admin_Product_Query {
     $in    = is_object( $input ) || is_array( $input ) ? (array) $input : [];
     $clean = [ 'filters' => self::clean_filters( isset( $in['filters'] ) ? $in['filters'] : [] ) ];
 
-    // A plain `search` term means a title search.
+    // A plain `search` term matches a title or the start of a SKU, so a typed or scanned code finds its product.
     $search = self::strings( isset( $in['search'] ) ? $in['search'] : [] );
     if ( $search && empty( $clean['filters']['title'] ) ) {
       $clean['filters']['title'] = $search[0];
+      if ( empty( $clean['filters']['sku'] ) ) {
+        $clean['filters']['sku'] = [ $search[0] ];
+      }
     }
 
     $clean['page']  = isset( $in['page'] ) ? max( 1, (int) $in['page'] ) : 1;

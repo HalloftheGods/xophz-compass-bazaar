@@ -114,11 +114,27 @@ if ( 'restricted' === $step ) {
 
 // create-undo: this step only sets up and reads; barcode-memory.sh drives the ajax.
 $undo_code = '4006381333931';
-if ( 'clear' === $step ) {
+if ( in_array( $step, [ 'clear', 'undo-cleanup', 'details-seed' ], true ) ) {
   $reset( $undo_code );
   foreach ( wc_get_products( [ 'sku' => $undo_code, 'status' => [ 'publish', 'trash', 'draft' ], 'limit' => -1 ] ) as $product ) {
     $product->delete( true );
   }
+}
+// A create also looks its code up for the descriptions. These checks are about the memory
+// rows, so the lookup is answered from this site's cache: no HTTP call and no row written.
+if ( 'clear' === $step ) {
+  set_transient( $admin::LOOKUP_CACHE_PREFIX . md5( $undo_code ), [ 'status' => 'not_found', 'source' => '', 'product' => null, 'price_hint' => null ], 600 );
+}
+// A found outcome with a public description, for the descriptions check.
+if ( 'details-seed' === $step ) {
+  $found = [ 'title' => 'Provider Pencil', 'brand' => 'Acme', 'description' => 'Soft <b>graphite</b> pencil for paper and wood $2.50', 'category' => '', 'image_url' => '', 'image_urls' => [] ];
+  set_transient( $admin::LOOKUP_CACHE_PREFIX . md5( $undo_code ), [ 'status' => 'found', 'source' => 'upcitemdb', 'product' => $found, 'price_hint' => null ], 600 );
+}
+if ( 'details-state' === $step ) {
+  $product = current( wc_get_products( [ 'sku' => $undo_code, 'status' => [ 'publish' ], 'limit' => 1 ] ) );
+  $say( 'description', $product ? $product->get_description() : 'no product' );
+  $say( 'short', $product ? $product->get_short_description() : 'no product' );
+  $say( 'memory_description', $row( $undo_code )['description'] ?? 'absent' );
 }
 if ( 'seed-provider' === $step ) {
   $memory::remember_provider( $undo_code, [ 'title' => 'Provider Pencil', 'brand' => 'Acme', 'image_url' => '' ] );

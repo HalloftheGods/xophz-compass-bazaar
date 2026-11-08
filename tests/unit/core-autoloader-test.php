@@ -39,7 +39,7 @@ check( 'autoload: a missing class is not fatal', class_exists( 'Xophz_Compass_Ba
 $M     = 'Xophz_Compass_Bazaar_Core_Modules';
 $lists = $M::lists();
 check( 'modules: three lists', array_keys( $lists ), [ 'admin_handlers', 'rest_controllers', 'hook_modules' ] );
-check( 'modules: counts', [ count( $lists['admin_handlers'] ), count( $lists['rest_controllers'] ), count( $lists['hook_modules'] ) ], [ 9, 6, 8 ] );
+check( 'modules: counts', [ count( $lists['admin_handlers'] ), count( $lists['rest_controllers'] ), count( $lists['hook_modules'] ) ], [ 11, 6, 8 ] );
 check( 'modules: full class names', $lists['rest_controllers'][2], 'Xophz_Compass_Bazaar_Rest_Checkouts' );
 check( 'modules: classes that do not exist yet are skipped', $M::existing( [ 'Xophz_Compass_Bazaar_Stock_Does_Not_Exist', 'Xophz_Compass_Bazaar_Core_Money' ] ), [ 'Xophz_Compass_Bazaar_Core_Money' ] );
 $GLOBALS['test_filters']['xophz_compass_bazaar_modules'] = [ 'hook_modules' => [ 'Core_Money', 'Xophz_Compass_Bazaar_Core_Canonical', '' ] ];

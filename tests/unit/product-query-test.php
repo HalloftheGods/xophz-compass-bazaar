@@ -46,7 +46,8 @@ check( 'blank terms dropped', $clean( [ 'filters' => [ 'title' => '  ', 'sku' =>
 check( 'apostrophe survives untouched', $clean( [ 'filters' => [ 'title' => "Men's" ] ] )['filters'], [ 'title' => "Men's" ] );
 check( 'sku string becomes a list', $clean( [ 'filters' => [ 'sku' => 'AB1' ] ] )['filters'], [ 'sku' => [ 'AB1' ] ] );
 check( 'sku array kept, non-strings dropped', $clean( [ 'filters' => [ 'sku' => [ 'AB1', 5, [ 'x' ], 'CD2' ] ] ] )['filters'], [ 'sku' => [ 'AB1', 'CD2' ] ] );
-check( 'search means a title search', $clean( [ 'search' => 'mug' ] )['filters'], [ 'title' => 'mug' ] );
+check( 'search means a title or SKU search', $clean( [ 'search' => 'mug' ] )['filters'], [ 'title' => 'mug', 'sku' => [ 'mug' ] ] );
+check( 'search keeps an explicit SKU list', $clean( [ 'search' => 'mug', 'filters' => [ 'sku' => [ 'A1' ] ] ] )['filters'], [ 'sku' => [ 'A1' ], 'title' => 'mug' ] );
 check( 'explicit title beats search', $clean( [ 'search' => 'mug', 'filters' => [ 'title' => 'cup' ] ] )['filters'], [ 'title' => 'cup' ] );
 check( 'non-object body is harmless', $Q::clean_args( 'junk' ), [ 'filters' => [], 'page' => 1, 'limit' => 10 ] );
 

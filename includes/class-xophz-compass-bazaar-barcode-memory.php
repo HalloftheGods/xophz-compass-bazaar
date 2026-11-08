@@ -8,17 +8,19 @@
  * by an option on the main network.
  *
  * Guarantees:
- * - Only public identity is stored: a name, a brand and the web address of a
- *   picture of the product, which may be on any host but never a store's own
+ * - Only public identity is stored: a name, a brand, a short public
+ *   description (plain text, at most DESCRIPTION_MAX characters) and the web
+ *   address of a picture of the product, which may be on any host but never a store's own
  *   uploads (a picture there would say who sells it). Never a price, cost or
  *   stock figure, and nothing says which site sells the item. title_owner is
  *   a one-way marker of the site that named a code; a read never returns it.
- * - Money amounts are taken out of titles (strip_money).
+ * - Money amounts are taken out of titles and descriptions (strip_money).
  * - Only a code with a valid check digit outside the GS1 restricted and
  *   in-store ranges is read or written (Barcode::is_shared_gtin).
  * - A write is one INSERT ... ON DUPLICATE KEY UPDATE. A provider write never
  *   overwrites a store's title; a store write overwrites a store's title only
- *   when the same site wrote it. Both only fill an empty brand or picture.
+ *   when the same site wrote it. Both only fill an empty brand, description
+ *   or picture.
  * - A read never writes. find() caches rows and misses for an hour in a
  *   global object-cache group; every write drops that code from it.
  * - With the memory off (main-network option bazaar_barcode_memory_enabled set
@@ -36,7 +38,7 @@
 class Xophz_Compass_Bazaar_Barcode_Memory {
 
   const TABLE          = 'bazaar_barcode_memory';
-  const DB_VERSION     = '26.11.07.1';
+  const DB_VERSION     = '26.11.07.2';
   const OPTION_VERSION = 'bazaar_barcode_memory_db_version';
   const OPTION_LOCK    = 'bazaar_barcode_memory_db_lock';
   const OPTION_ENABLED = 'bazaar_barcode_memory_enabled';
@@ -105,6 +107,11 @@ class Xophz_Compass_Bazaar_Barcode_Memory {
     return is_scalar( $value ) ? self::cut( self::strip_money( trim( sanitize_text_field( (string) $value ) ) ), self::BRAND_MAX ) : '';
   }
 
+  /** The description as it may be stored: plain text, no money, at most DESCRIPTION_MAX characters. */
+  public static function clean_description( $value ): string {
+    return Xophz_Compass_Bazaar_Barcode_Details::clean_description( $value );
+  }
+
   /**
    * The URL when it is an acceptable picture address that fits the column and
    * is not a store's own upload, else ''. Any WordPress uploads path counts,
@@ -128,10 +135,11 @@ class Xophz_Compass_Bazaar_Barcode_Memory {
       return null;
     }
     return [
-      'title'     => (string) ( $row['title'] ?? '' ),
-      'brand'     => (string) ( $row['brand'] ?? '' ),
-      'image_url' => (string) ( $row['image_url'] ?? '' ),
-      'source'    => (string) ( $row['source'] ?? '' ),
+      'title'       => (string) ( $row['title'] ?? '' ),
+      'brand'       => (string) ( $row['brand'] ?? '' ),
+      'description' => (string) ( $row['description'] ?? '' ),
+      'image_url'   => (string) ( $row['image_url'] ?? '' ),
+      'source'      => (string) ( $row['source'] ?? '' ),
     ];
   }
 
@@ -141,6 +149,7 @@ class Xophz_Compass_Bazaar_Barcode_Memory {
   code varchar(14) NOT NULL,
   title varchar(200) NOT NULL DEFAULT '',
   brand varchar(100) NOT NULL DEFAULT '',
+  description varchar(1000) NOT NULL DEFAULT '',
   image_url varchar(500) NOT NULL DEFAULT '',
   source varchar(10) NOT NULL DEFAULT 'provider',
   title_owner char(16) NOT NULL DEFAULT '',
@@ -159,11 +168,12 @@ class Xophz_Compass_Bazaar_Barcode_Memory {
    */
   public static function upsert_sql( string $table ): string {
     $held = "source = 'store' AND title_owner <> VALUES(title_owner)";
-    return "INSERT INTO {$table} (code, title, brand, image_url, source, title_owner, hits, created_at, updated_at)"
-      . ' VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s)'
+    return "INSERT INTO {$table} (code, title, brand, description, image_url, source, title_owner, hits, created_at, updated_at)"
+      . ' VALUES (%s, %s, %s, %s, %s, %s, %s, 1, %s, %s)'
       . ' ON DUPLICATE KEY UPDATE'
       . " title = IF({$held}, title, VALUES(title)),"
       . " brand = IF(brand = '', VALUES(brand), brand),"
+      . " description = IF(description = '', VALUES(description), description),"
       . " image_url = IF(image_url = '', VALUES(image_url), image_url),"
       . " title_owner = IF({$held}, title_owner, VALUES(title_owner)),"
       . ' hits = hits + 1,'
@@ -302,7 +312,7 @@ class Xophz_Compass_Bazaar_Barcode_Memory {
   /**
    * Remember a provider's answer.
    *
-   * @param array $product title, brand, image_url
+   * @param array $product title, brand, description, image_url
    */
   public static function remember_provider( string $barcode, array $product ): void {
     $key   = self::key( $barcode );
@@ -310,23 +320,32 @@ class Xophz_Compass_Bazaar_Barcode_Memory {
     if ( '' === $key || '' === $title || ! self::ready() ) {
       return;
     }
-    self::upsert( $key, $title, self::clean_brand( $product['brand'] ?? '' ), self::clean_image( $product['image_url'] ?? '', self::own_hosts() ), 'provider', '' );
+    self::upsert(
+      $key,
+      $title,
+      self::clean_brand( $product['brand'] ?? '' ),
+      self::clean_description( $product['description'] ?? '' ),
+      self::clean_image( $product['image_url'] ?? '', self::own_hosts() ),
+      'provider',
+      ''
+    );
   }
 
   /**
-   * Remember the name a store gave an item it just saved.
+   * Remember the name a store gave an item it just saved, and the public
+   * description a lookup gave it (never text a person typed: pass '' for that).
    *
    * @return array{code:string,before:?array}|null What restore() needs to take
    *   the write back. Null when nothing was written.
    */
-  public static function remember_store( string $barcode, string $title, string $image_url ): ?array {
+  public static function remember_store( string $barcode, string $title, string $image_url, string $description = '' ): ?array {
     $key   = self::key( $barcode );
     $title = self::clean_title( $title );
     if ( '' === $key || '' === $title || ! self::ready() ) {
       return null;
     }
     $before = self::row( $key );
-    if ( ! self::upsert( $key, $title, '', self::clean_image( $image_url, self::own_hosts() ), 'store', self::owner() ) ) {
+    if ( ! self::upsert( $key, $title, '', self::clean_description( $description ), self::clean_image( $image_url, self::own_hosts() ), 'store', self::owner() ) ) {
       return null;
     }
     return [ 'code' => $key, 'before' => $before ];
@@ -351,9 +370,10 @@ class Xophz_Compass_Bazaar_Barcode_Memory {
       $wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE code = %s AND source = 'store' AND title_owner = %s", $key, self::owner() ) );
     } else {
       $wpdb->query( $wpdb->prepare(
-        "UPDATE {$table} SET title = %s, brand = %s, image_url = %s, source = %s, title_owner = %s, hits = %d, updated_at = %s WHERE code = %s AND source = 'store' AND title_owner = %s",
+        "UPDATE {$table} SET title = %s, brand = %s, description = %s, image_url = %s, source = %s, title_owner = %s, hits = %d, updated_at = %s WHERE code = %s AND source = 'store' AND title_owner = %s",
         (string) $before['title'],
         (string) $before['brand'],
+        (string) ( $before['description'] ?? '' ),
         (string) $before['image_url'],
         (string) $before['source'],
         (string) $before['title_owner'],
@@ -382,10 +402,10 @@ class Xophz_Compass_Bazaar_Barcode_Memory {
     return $removed > 0;
   }
 
-  private static function upsert( string $key, string $title, string $brand, string $image_url, string $source, string $owner ): bool {
+  private static function upsert( string $key, string $title, string $brand, string $description, string $image_url, string $source, string $owner ): bool {
     global $wpdb;
     $now  = gmdate( 'Y-m-d H:i:s' );
-    $done = $wpdb->query( $wpdb->prepare( self::upsert_sql( self::table() ), $key, $title, $brand, $image_url, $source, $owner, $now, $now ) );
+    $done = $wpdb->query( $wpdb->prepare( self::upsert_sql( self::table() ), $key, $title, $brand, $description, $image_url, $source, $owner, $now, $now ) );
     self::drop_cached( $key );
     return false !== $done;
   }

@@ -174,6 +174,7 @@ class Xophz_Compass_Bazaar extends Xophz_Compass_Plugin_Base {
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/class-xophz-compass-bazaar-barcode.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/class-xophz-compass-bazaar-barcode-sources.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/class-xophz-compass-bazaar-barcode-fetcher.php';
+    require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/class-xophz-compass-bazaar-barcode-details.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/class-xophz-compass-bazaar-barcode-memory.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/class-xophz-compass-bazaar-barcode-image.php';
     require_once plugin_dir_path( dirname( __FILE__ ) ) . 'admin/class-xophz-compass-bazaar-admin-quick-add.php';
