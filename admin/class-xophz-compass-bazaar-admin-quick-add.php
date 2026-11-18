@@ -279,7 +279,7 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
 
     // Only a code with a valid check digit is worth a provider call; a typo is not.
     if ( $code['valid'] ) {
-      $found = Xophz_Compass_Bazaar_Admin::global_barcode_lookup( $code['normalized'], false, $fresh );
+      $found = Xophz_Compass_Bazaar_Admin::global_barcode_lookup( $code['normalized'], true, $fresh );
       if ( isset( $found['sources_tried'] ) && is_array( $found['sources_tried'] ) ) {
         $out['sources_tried'] = $found['sources_tried'];
       }
@@ -325,6 +325,19 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
         if ( $id > 0 ) {
           return $id;
         }
+      }
+    }
+    global $wpdb;
+    foreach ( $candidates as $candidate ) {
+      if ( '' === $candidate ) {
+        continue;
+      }
+      $id = (int) $wpdb->get_var( $wpdb->prepare(
+        "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key IN ('_barcode', 'barcode') AND meta_value = %s LIMIT 1",
+        $candidate
+      ) );
+      if ( $id > 0 ) {
+        return $id;
       }
     }
     return 0;
@@ -496,9 +509,31 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
     update_post_meta( $product_id, self::LAST_QTY_META, (int) $qty );
     if ( ! empty( $barcode ) ) {
       $barcode_val = ! empty( $barcode['normalized'] ) ? $barcode['normalized'] : ( ! empty( $barcode['digits'] ) ? $barcode['digits'] : ( $barcode['raw'] ?? '' ) );
-      if ( '' !== $barcode_val && empty( get_post_meta( $product_id, '_barcode', true ) ) ) {
-        update_post_meta( $product_id, '_barcode', $barcode_val );
-        update_post_meta( $product_id, 'barcode', $barcode_val );
+      if ( '' !== $barcode_val ) {
+        if ( empty( get_post_meta( $product_id, '_barcode', true ) ) ) {
+          update_post_meta( $product_id, '_barcode', $barcode_val );
+        }
+        if ( empty( get_post_meta( $product_id, 'barcode', true ) ) ) {
+          update_post_meta( $product_id, 'barcode', $barcode_val );
+        }
+        $restock_dirty = false;
+        if ( '' === trim( (string) $product->get_sku( 'edit' ) ) ) {
+          try {
+            $product->set_sku( $barcode_val );
+            $restock_dirty = true;
+          } catch ( \Throwable $e ) {
+            // SKU conflict
+          }
+        }
+        if ( '' === trim( (string) $product->get_description( 'edit' ) ) && ! empty( $barcode['valid'] ) ) {
+          $desc = self::describe_new( $product, $barcode );
+          if ( '' !== $desc ) {
+            $restock_dirty = true;
+          }
+        }
+        if ( $restock_dirty ) {
+          $product->save();
+        }
       }
     }
     $log_id = self::log( $user_id, [

@@ -2,6 +2,20 @@
 
 All notable changes to the Compass Bazaar plugin. Newest first.
 
+## 2026-11-18
+
+### Added
+- **Barcode Data Import Preview Modal**: Added interactive preview modal (`AddProductBarcodeImportModal.vue`) when scanning or fetching barcodes in the Product Editor. Shows discovered Title, Full Description, Image thumbnail, Category/Brand, and SKU/Barcode with individual checkboxes allowing users to selectively import specific fields into the product.
+- **Selective Import Engine**: Added `applySelectedBarcodeImport` helper in `mergeBarcodeLookup.ts` supporting granular field application and title conflict resolution.
+
+### Changed
+- **High-Contrast Barcode Status Feedback**: Fixed barcode status message color in Desktop (`AddProductContentCanvas.vue`) and Phone (`AddProductPhoneBarcode.vue`) editors. Replaced low-contrast grey caption styling with vibrant emerald green (`#4ade80`) for successful matches and bright amber (`#fbbf24`) for warnings, paired with a "Review & Import" action button.
+
+### Fixed
+- **Open Library & Waterfall Description Extraction**: Fixed Open Library description parser in both frontend (`useBarcodeLookupWaterfall.ts`) and backend (`class-xophz-compass-bazaar-barcode-sources.php`) to extract `description` strings and `{ type, value }` text objects in addition to subtitle and notes. Enabled Google Books fallthrough enrichment when an initial provider match lacks a description.
+- **Quick Add Description & Multi-Meta Matching**: Quick Add (`class-xophz-compass-bazaar-admin-quick-add.php`) requests descriptions (`$need_description = true`), checks `_barcode` and `barcode` postmeta during `find_existing`, and synchronizes SKU, `_barcode`, and descriptions during both product creation and restocking.
+- **Option A Multi-Meta Barcode Backfill & SKU Synchronization**: Upgraded `class-xophz-compass-bazaar-admin-product-details.php` to scan for products missing descriptions across `_sku`, `_barcode`, `barcode`, `_global_unique_id`, `_gtin`, and `_upc`. Cross-populates missing SKUs and `_barcode`/`barcode` postmeta automatically during batch execution.
+
 ## 2026-11-17
 
 ### Added

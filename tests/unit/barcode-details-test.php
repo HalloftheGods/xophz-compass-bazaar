@@ -85,4 +85,32 @@ check( 'sql: nine placeholders', substr_count( $sql, '%s' ), 9 );
 check( 'sql: still one statement', substr_count( $sql, ';' ), 0 );
 check( 'sql: no price column', false !== stripos( $sql, 'price' ), false );
 
+// Open Library description parsing tests
+$ol_obj = $S::parse_open_library( 200, (string) json_encode( [
+  'ISBN:9781633464025' => [
+    'title' => 'Sheriff Callie Activity Book',
+    'description' => [ 'type' => '/type/text', 'value' => 'Join Sheriff Callie in Nice and Friendly Corners.' ],
+    'subjects' => [ [ 'name' => 'Children Books' ] ],
+  ]
+] ), '9781633464025' );
+check( 'openlibrary: object description extracted', $ol_obj['product']['description'], 'Join Sheriff Callie in Nice and Friendly Corners.' );
+
+$ol_str = $S::parse_open_library( 200, (string) json_encode( [
+  'ISBN:9781633464025' => [
+    'title' => 'Sheriff Callie Activity Book',
+    'description' => 'A fun activity book with stickers.',
+  ]
+] ), '9781633464025' );
+check( 'openlibrary: string description extracted', $ol_str['product']['description'], 'A fun activity book with stickers.' );
+
+// Open Food Facts generic_name_en fallback
+$off_en = $S::parse_open_facts( 200, (string) json_encode( [
+  'status' => 1,
+  'product' => [
+    'product_name' => 'Organic Applesauce',
+    'generic_name_en' => 'Unsweetened organic applesauce cups'
+  ]
+] ), 'openfoodfacts' );
+check( 'openfoodfacts: generic_name_en fallback description', $off_en['product']['description'], 'Unsweetened organic applesauce cups' );
+
 bazaar_test_standalone( __FILE__ );

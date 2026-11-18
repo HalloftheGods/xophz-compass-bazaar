@@ -101,11 +101,15 @@ class Xophz_Compass_Bazaar_Barcode_Sources {
       $title = $brand . ' ' . $title;
     }
     $image          = self::field( $p['image_url'] ?? ( $p['image_front_url'] ?? '' ) );
+    $desc           = self::field( $p['generic_name'] ?? '' );
+    if ( '' === $desc ) {
+      $desc = self::field( $p['generic_name_en'] ?? ( $p['summary'] ?? ( $p['description'] ?? '' ) ) );
+    }
     $out['status']  = 'found';
     $out['product'] = [
       'title'       => $title,
       'brand'       => $brand,
-      'description' => self::field( $p['generic_name'] ?? '' ),
+      'description' => $desc,
       'category'    => self::field( $p['categories'] ?? ( $p['categories_old'] ?? '' ) ),
       'image_url'   => $image,
       'image_urls'  => '' !== $image ? [ $image ] : [],
@@ -280,7 +284,16 @@ class Xophz_Compass_Bazaar_Barcode_Sources {
     $image = self::field( $book['cover']['large'] ?? ( $book['cover']['medium'] ?? ( $book['cover']['small'] ?? '' ) ) );
     $images = '' !== $image ? [ $image ] : [];
     $category = self::field( $book['subjects'][0]['name'] ?? 'Books' );
-    $desc = self::field( $book['notes'] ?? ( $book['subtitle'] ?? '' ) );
+    $desc_raw = $book['description'] ?? null;
+    $desc = '';
+    if ( is_string( $desc_raw ) ) {
+      $desc = self::field( $desc_raw );
+    } elseif ( is_array( $desc_raw ) && isset( $desc_raw['value'] ) && is_string( $desc_raw['value'] ) ) {
+      $desc = self::field( $desc_raw['value'] );
+    }
+    if ( '' === $desc ) {
+      $desc = self::field( $book['notes'] ?? ( $book['subtitle'] ?? '' ) );
+    }
 
     $out['status'] = 'found';
     $out['product'] = [

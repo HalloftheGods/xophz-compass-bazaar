@@ -306,7 +306,7 @@ class Xophz_Compass_Bazaar_Admin {
         return;
       }
 
-      $found = self::global_barcode_lookup($barcode);
+      $found = self::global_barcode_lookup($barcode, true);
 
       if ('found' === $found['status'] && !empty($found['product']['title'])) {
         // Same as Quick Add: a save may attach only a picture this lookup offered.
@@ -414,7 +414,7 @@ class Xophz_Compass_Bazaar_Admin {
     }
 
     $open_facts_code = '' !== $code['normalized'] ? Xophz_Compass_Bazaar_Barcode::off_query_code($code) : $query;
-    $result = array_merge($empty, self::ask_providers($open_facts_code, $query));
+    $result = array_merge($empty, self::ask_providers($open_facts_code, $query, $need_description));
     $negative_ttl = (int) apply_filters('bazaar_barcode_negative_cache_ttl', 5 * MINUTE_IN_SECONDS);
     $ttl = [
       'found' => 30 * DAY_IN_SECONDS,
@@ -437,13 +437,23 @@ class Xophz_Compass_Bazaar_Admin {
   }
 
   /** Ask each provider in turn following the 10-tier waterfall pipeline. @return array One merged outcome. */
-  private static function ask_providers(string $open_facts_code, string $query): array {
+  private static function ask_providers(string $open_facts_code, string $query, bool $need_description = false): array {
     $sources = 'Xophz_Compass_Bazaar_Barcode_Sources';
 
     // Tier 5 & 6 Branch: Books / Media ISBN Prefix (978 / 979 / 10-digit)
     if ($sources::is_isbn($query)) {
       $ol = self::lookup_open_library($query);
       if ('found' === $ol['status']) {
+        if ($need_description && empty($ol['product']['description'])) {
+          $gb = self::lookup_google_books($query);
+          if ('found' === $gb['status'] && !empty($gb['product']['description'])) {
+            $ol['product']['description'] = $gb['product']['description'];
+            if (empty($ol['product']['image_url']) && !empty($gb['product']['image_url'])) {
+              $ol['product']['image_url'] = $gb['product']['image_url'];
+              $ol['product']['image_urls'] = $gb['product']['image_urls'];
+            }
+          }
+        }
         return $ol;
       }
       $gb = self::lookup_google_books($query);

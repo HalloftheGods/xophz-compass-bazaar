@@ -197,7 +197,23 @@ class Xophz_Compass_Bazaar_Admin_Product_Details {
         $stats['cursor'] = $id;
         continue;
       }
-      $code = Xophz_Compass_Bazaar_Barcode::normalize( (string) $product->get_sku( 'edit' ) );
+      $raw_code = (string) $product->get_sku( 'edit' );
+      if ( '' === $raw_code ) {
+        $raw_code = (string) get_post_meta( $id, '_barcode', true );
+      }
+      if ( '' === $raw_code ) {
+        $raw_code = (string) get_post_meta( $id, 'barcode', true );
+      }
+      if ( '' === $raw_code && method_exists( $product, 'get_global_unique_id' ) ) {
+        $raw_code = (string) $product->get_global_unique_id( 'edit' );
+      }
+      if ( '' === $raw_code ) {
+        $raw_code = (string) get_post_meta( $id, '_gtin', true );
+      }
+      if ( '' === $raw_code ) {
+        $raw_code = (string) get_post_meta( $id, '_upc', true );
+      }
+      $code = Xophz_Compass_Bazaar_Barcode::normalize( $raw_code );
       if ( empty( $code['valid'] ) ) {
         $stats['cursor'] = $id;
         $stats['examined']++;
@@ -207,6 +223,34 @@ class Xophz_Compass_Bazaar_Admin_Product_Details {
       if ( $stats['looked_up'] >= self::BATCH_LOOKUPS || microtime( true ) - $began > self::BATCH_SECONDS ) {
         break;
       }
+
+      $barcode_val = ! empty( $code['normalized'] ) ? $code['normalized'] : ( ! empty( $code['digits'] ) ? $code['digits'] : ( $code['raw'] ?? '' ) );
+      $cross_fill_dirty = false;
+      if ( '' !== $barcode_val ) {
+        if ( '' === trim( (string) $product->get_sku( 'edit' ) ) ) {
+          try {
+            $product->set_sku( $barcode_val );
+            $cross_fill_dirty = true;
+          } catch ( \Throwable $e ) {
+            // SKU conflict
+          }
+        }
+        if ( empty( get_post_meta( $id, '_barcode', true ) ) ) {
+          update_post_meta( $id, '_barcode', $barcode_val );
+        }
+        if ( empty( get_post_meta( $id, 'barcode', true ) ) ) {
+          update_post_meta( $id, 'barcode', $barcode_val );
+        }
+        if ( method_exists( $product, 'set_global_unique_id' ) && '' === trim( (string) $product->get_global_unique_id( 'edit' ) ) && ! empty( $code['valid'] ) ) {
+          try {
+            $product->set_global_unique_id( $barcode_val );
+            $cross_fill_dirty = true;
+          } catch ( \Throwable $e ) {
+            // global unique id conflict
+          }
+        }
+      }
+
       $answer = self::details_for( $code );
       $stats['looked_up']++;
       if ( 'rate_limited' === $answer['status'] ) {
@@ -215,9 +259,12 @@ class Xophz_Compass_Bazaar_Admin_Product_Details {
       }
       $stats['cursor'] = $id;
       $stats['examined']++;
-      if ( 'found' === $answer['status'] && [] !== self::fill_descriptions( $product, $answer['details'] ) ) {
+      $written = ( 'found' === $answer['status'] ) ? self::fill_descriptions( $product, $answer['details'] ) : [];
+      if ( [] !== $written || $cross_fill_dirty ) {
         $product->save();
-        $stats['filled']++;
+        if ( [] !== $written ) {
+          $stats['filled']++;
+        }
       } elseif ( 'error' === $answer['status'] ) {
         $stats['failed']++;
       } else {
@@ -238,19 +285,19 @@ class Xophz_Compass_Bazaar_Admin_Product_Details {
    */
   private static function blank_product_ids( int $after, int $limit ): array {
     global $wpdb;
-    $sql = "SELECT p.ID FROM {$wpdb->posts} p" . self::blank_product_where() . ' ORDER BY p.ID ASC LIMIT %d';
+    $sql = "SELECT DISTINCT p.ID FROM {$wpdb->posts} p" . self::blank_product_where() . ' ORDER BY p.ID ASC LIMIT %d';
     return array_map( 'intval', (array) $wpdb->get_col( $wpdb->prepare( $sql, $after, $limit ) ) );
   }
 
   /** How many such products are left after $after. */
   private static function count_blank_products( int $after ): int {
     global $wpdb;
-    return (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->posts} p" . self::blank_product_where(), $after ) );
+    return (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(DISTINCT p.ID) FROM {$wpdb->posts} p" . self::blank_product_where(), $after ) );
   }
 
   private static function blank_product_where(): string {
     global $wpdb;
-    return " INNER JOIN {$wpdb->postmeta} sku ON sku.post_id = p.ID AND sku.meta_key = '_sku' AND sku.meta_value REGEXP '[0-9]{8}'"
+    return " INNER JOIN {$wpdb->postmeta} bc ON bc.post_id = p.ID AND bc.meta_key IN ('_sku', '_barcode', 'barcode', '_global_unique_id', '_gtin', '_upc') AND bc.meta_value REGEXP '[0-9]{8}'"
       . " WHERE p.post_type = 'product' AND p.post_status IN ('publish', 'draft', 'pending', 'private')"
       . " AND TRIM(p.post_content) = '' AND p.ID > %d";
   }
