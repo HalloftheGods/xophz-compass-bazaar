@@ -438,14 +438,15 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       $existing = self::find_existing( $barcode );
       if ( $existing > 0 ) {
         // apply_add answers unsupported_product when the match cannot be restocked here.
-        return $this->apply_add( $existing, $qty, $price, $uuid, $user_id );
+        return $this->apply_add( $existing, $qty, $price, $uuid, $user_id, $barcode );
       }
       $title = self::parse_title( $args->title ?? '' );
       if ( '' === $title ) {
         return self::failure( 'title_required', 'A new item needs a short name.' );
       }
       $images = self::images_to_try( $args->image_url ?? null, $barcode, $user_id );
-      return $this->apply_create( $barcode, $title, $price, $qty, $images, $uuid, $user_id );
+      $description = isset( $args->description ) && is_string( $args->description ) ? sanitize_textarea_field( $args->description ) : '';
+      return $this->apply_create( $barcode, $title, $price, $qty, $images, $uuid, $user_id, $description );
     }
 
     $product_id = isset( $args->product_id ) && is_numeric( $args->product_id ) ? (int) $args->product_id : 0;
@@ -453,7 +454,7 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       return self::failure( 'invalid_request', 'product_id is required.' );
     }
     if ( 'add' === $mode ) {
-      return $this->apply_add( $product_id, $qty, $price, $uuid, $user_id );
+      return $this->apply_add( $product_id, $qty, $price, $uuid, $user_id, $barcode );
     }
     $seen_raw = $args->stock_seen ?? null;
     $seen     = is_int( $seen_raw ) || is_float( $seen_raw ) || ( is_string( $seen_raw ) && is_numeric( $seen_raw ) ) ? (float) $seen_raw : null;
@@ -461,7 +462,7 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
   }
 
   /** mode add (and create of a code that already exists): add to stock, change the price when sent and different. */
-  private function apply_add( int $product_id, float $qty, ?float $price, string $uuid, int $user_id ): array {
+  private function apply_add( int $product_id, float $qty, ?float $price, string $uuid, int $user_id, array $barcode = [] ): array {
     $product = self::editable_product( $product_id );
     if ( ! $product ) {
       return self::unavailable( $product_id );
@@ -488,6 +489,13 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
     $product = self::fresh( $product_id );
 
     update_post_meta( $product_id, self::LAST_QTY_META, (int) $qty );
+    if ( ! empty( $barcode ) ) {
+      $barcode_val = ! empty( $barcode['normalized'] ) ? $barcode['normalized'] : ( ! empty( $barcode['digits'] ) ? $barcode['digits'] : ( $barcode['raw'] ?? '' ) );
+      if ( '' !== $barcode_val && empty( get_post_meta( $product_id, '_barcode', true ) ) ) {
+        update_post_meta( $product_id, '_barcode', $barcode_val );
+        update_post_meta( $product_id, 'barcode', $barcode_val );
+      }
+    }
     $log_id = self::log( $user_id, [
       'product_id' => $product_id,
       'title'      => $product->get_name(),
@@ -508,7 +516,7 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
   }
 
   /** mode create: a new simple product, published, managing stock. */
-  private function apply_create( array $barcode, string $title, float $price, float $qty, array $images, string $uuid, int $user_id ): array {
+  private function apply_create( array $barcode, string $title, float $price, float $qty, array $images, string $uuid, int $user_id, string $client_description = '' ): array {
     self::require_cap( Xophz_Compass_Bazaar_Security_Capabilities::MANAGE_CATALOG );
     self::require_cap( Xophz_Compass_Bazaar_Security_Capabilities::MANAGE_STOCK );
 
@@ -524,7 +532,7 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       // Another save took this SKU since the duplicate check: restock that item instead.
       $existing = self::find_existing( $barcode );
       if ( $existing > 0 ) {
-        return $this->apply_add( $existing, $qty, $price, $uuid, $user_id );
+        return $this->apply_add( $existing, $qty, $price, $uuid, $user_id, $barcode );
       }
       throw $e;
     }
@@ -535,7 +543,13 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
         // chemx-allow: the SKU already holds the code; a refused global id (taken or malformed) is not worth failing the save.
       }
     }
+    if ( '' !== $client_description && '' === $product->get_description( 'edit' ) ) {
+      $product->set_description( wp_kses_post( $client_description ) );
+    }
     $description = self::describe_new( $product, $barcode );
+    if ( empty( $description ) && '' !== $client_description ) {
+      $description = $client_description;
+    }
     $product_id  = (int) $product->save();
     if ( $product_id <= 0 ) {
       return self::failure( 'failed', "That didn't save. Nothing was lost." );
@@ -545,6 +559,11 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
     // client_uuid does not find (or duplicate) a half-made item.
     try {
       update_post_meta( $product_id, self::CREATED_META, time() );
+      $barcode_val = ! empty( $barcode['normalized'] ) ? $barcode['normalized'] : ( ! empty( $barcode['digits'] ) ? $barcode['digits'] : ( $barcode['raw'] ?? '' ) );
+      if ( '' !== $barcode_val ) {
+        update_post_meta( $product_id, '_barcode', $barcode_val );
+        update_post_meta( $product_id, 'barcode', $barcode_val );
+      }
       $image = self::attach_first_image( $product_id, $images, $title );
       // Same path as saveProduct: save first, then write the quantity.
       Xophz_Compass_Bazaar_Admin_Product_Stock::set_quantity(

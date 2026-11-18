@@ -12,6 +12,7 @@ All notable changes to the Compass Bazaar plugin. Newest first.
 
 ### Fixed
 - **Camera Device Release & Re-Acquisition**: Resolved camera lock where subsequent scanner sessions reported no camera found until app reboot. Added hardware track termination (`track.stop()`), active stream registry, preemptive track clearance, and awaited asynchronous shutdown before dialog unmount.
+- **Quick Add Barcode & Description Persistence**: Quick Add preserves scanned or typed UPC codes when transitioning to manual naming, saves `_barcode` and `barcode` product post meta in WooCommerce along with SKU and GTIN, and guarantees draft descriptions from lookups are saved to new products.
 
 ## 2026-11-08 (pre-launch polish, batch 2)
 

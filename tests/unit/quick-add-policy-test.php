@@ -13,6 +13,7 @@ $bazaar_root = dirname( dirname( __DIR__ ) );
 require_once $bazaar_root . '/includes/security/class-xophz-compass-bazaar-security-capabilities.php';
 require_once $bazaar_root . '/includes/security/class-xophz-compass-bazaar-security-policy.php';
 require_once $bazaar_root . '/includes/security/class-xophz-compass-bazaar-security-guard.php';
+require_once $bazaar_root . '/includes/class-xophz-compass-bazaar-barcode-sources.php';
 require_once $bazaar_root . '/admin/class-xophz-compass-bazaar-admin-quick-add.php';
 require_once $bazaar_root . '/admin/class-xophz-compass-bazaar-admin-quick-pile.php';
 
