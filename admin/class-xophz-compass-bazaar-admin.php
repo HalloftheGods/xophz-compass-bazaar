@@ -432,15 +432,38 @@ class Xophz_Compass_Bazaar_Admin {
     return Xophz_Compass_Bazaar_Barcode_Memory::clean_description($product['description'] ?? '');
   }
 
-  /** Ask each provider in turn until one finds the code. @return array One merged outcome. */
+  /** Ask each provider in turn following the 10-tier waterfall pipeline. @return array One merged outcome. */
   private static function ask_providers(string $open_facts_code, string $query): array {
     $sources = 'Xophz_Compass_Bazaar_Barcode_Sources';
+
+    // Tier 5 & 6 Branch: Books / Media ISBN Prefix (978 / 979 / 10-digit)
+    if ($sources::is_isbn($query)) {
+      $ol = self::lookup_open_library($query);
+      if ('found' === $ol['status']) {
+        return $ol;
+      }
+      $gb = self::lookup_google_books($query);
+      if ('found' === $gb['status']) {
+        return $gb;
+      }
+    }
+
+    // Tier 7 Branch: Medication / NDC Code Prefix (GS1 prefix 3)
+    if ($sources::is_ndc_candidate($query)) {
+      $fda = self::lookup_open_fda($query);
+      if ('found' === $fda['status']) {
+        return $fda;
+      }
+    }
+
+    // Tier 1: Open Food Facts (Zero Quota / High Coverage for Grocery & Pantry)
     $food = Xophz_Compass_Bazaar_Barcode_Fetcher::get($sources::open_facts_url($sources::OPEN_FOOD_FACTS, $open_facts_code));
     $outcomes = [$sources::parse_open_facts($food['status'], $food['body'], $sources::OPEN_FOOD_FACTS)];
     if ('found' === $outcomes[0]['status']) {
       return $sources::merge($outcomes);
     }
 
+    // Tiers 2, 3, 4: Open Beauty Facts, Open Pet Food Facts, Open Products Facts
     $urls = [];
     foreach ($sources::OPEN_FACTS_OTHERS as $source) {
       $urls[$source] = $sources::open_facts_url($source, $open_facts_code);
@@ -453,20 +476,148 @@ class Xophz_Compass_Bazaar_Admin {
       return $merged;
     }
 
-    $outcomes[] = self::lookup_upcitemdb($query);
+    // Tier 8: Brocade.io Open Retail Database
+    $brocade = self::lookup_brocade($query);
+    if ('found' === $brocade['status']) {
+      return $brocade;
+    }
+    $outcomes[] = $brocade;
+
+    // Tier 9: UPCitemdb Trial API (100 req/day quota protected)
+    $upc = self::lookup_upcitemdb($query);
+    if ('found' === $upc['status']) {
+      return $upc;
+    }
+    $outcomes[] = $upc;
+
+    // Tier 10: Barcode Monster (Long-tail public database)
+    $monster = self::lookup_barcode_monster($query);
+    if ('found' === $monster['status']) {
+      return $monster;
+    }
+    $outcomes[] = $monster;
+
     return $sources::merge($outcomes);
   }
 
-  /** UPCitemdb trial API. @return array status, source, product, price_hint */
-  private static function lookup_upcitemdb(string $code): array {
-    $response = wp_remote_get('https://api.upcitemdb.com/prod/trial/lookup?upc=' . rawurlencode($code), [
-      'timeout' => Xophz_Compass_Bazaar_Barcode_Sources::TIMEOUT,
+  /** Tier 5: Open Library API. @return array status, source, product, price_hint */
+  private static function lookup_open_library(string $isbn): array {
+    $sources = 'Xophz_Compass_Bazaar_Barcode_Sources';
+    $response = wp_remote_get($sources::open_library_url($isbn), [
+      'timeout' => 5,
+      'user-agent' => $sources::USER_AGENT,
       'headers' => ['Accept' => 'application/json'],
     ]);
     if (is_wp_error($response)) {
-      return Xophz_Compass_Bazaar_Barcode_Sources::parse_upcitemdb(0, '');
+      return ['status' => 'error', 'source' => 'openlibrary', 'product' => null, 'price_hint' => null];
     }
-    return Xophz_Compass_Bazaar_Barcode_Sources::parse_upcitemdb(
+    return $sources::parse_open_library(
+      (int) wp_remote_retrieve_response_code($response),
+      (string) wp_remote_retrieve_body($response),
+      $isbn
+    );
+  }
+
+  /** Tier 6: Google Books API. @return array status, source, product, price_hint */
+  private static function lookup_google_books(string $isbn): array {
+    $sources = 'Xophz_Compass_Bazaar_Barcode_Sources';
+    $response = wp_remote_get($sources::google_books_url($isbn), [
+      'timeout' => 5,
+      'user-agent' => $sources::USER_AGENT,
+      'headers' => ['Accept' => 'application/json'],
+    ]);
+    if (is_wp_error($response)) {
+      return ['status' => 'error', 'source' => 'googlebooks', 'product' => null, 'price_hint' => null];
+    }
+    return $sources::parse_google_books(
+      (int) wp_remote_retrieve_response_code($response),
+      (string) wp_remote_retrieve_body($response)
+    );
+  }
+
+  /** Tier 7: openFDA NDC API. @return array status, source, product, price_hint */
+  private static function lookup_open_fda(string $ndc): array {
+    $sources = 'Xophz_Compass_Bazaar_Barcode_Sources';
+    $response = wp_remote_get($sources::open_fda_url($ndc), [
+      'timeout' => 5,
+      'user-agent' => $sources::USER_AGENT,
+      'headers' => ['Accept' => 'application/json'],
+    ]);
+    if (is_wp_error($response)) {
+      return ['status' => 'error', 'source' => 'openfda', 'product' => null, 'price_hint' => null];
+    }
+    return $sources::parse_open_fda(
+      (int) wp_remote_retrieve_response_code($response),
+      (string) wp_remote_retrieve_body($response)
+    );
+  }
+
+  /** Tier 8: Brocade.io Open Retail API. @return array status, source, product, price_hint */
+  private static function lookup_brocade(string $code): array {
+    $sources = 'Xophz_Compass_Bazaar_Barcode_Sources';
+    $response = wp_remote_get($sources::brocade_url($code), [
+      'timeout' => 5,
+      'user-agent' => $sources::USER_AGENT,
+      'headers' => ['Accept' => 'application/json'],
+    ]);
+    if (is_wp_error($response)) {
+      return ['status' => 'error', 'source' => 'brocade', 'product' => null, 'price_hint' => null];
+    }
+    return $sources::parse_brocade(
+      (int) wp_remote_retrieve_response_code($response),
+      (string) wp_remote_retrieve_body($response)
+    );
+  }
+
+  /** Tier 9: UPCitemdb trial API with candidate codes & User-Agent. @return array status, source, product, price_hint */
+  private static function lookup_upcitemdb(string $code): array {
+    $sources = 'Xophz_Compass_Bazaar_Barcode_Sources';
+    $digits = (string) preg_replace('/\D/', '', $code);
+    $candidates = [$digits];
+    if (12 === strlen($digits)) {
+      $candidates[] = '0' . $digits;
+    } elseif (13 === strlen($digits) && str_starts_with($digits, '0')) {
+      $candidates[] = substr($digits, 1);
+    }
+
+    $last = $sources::parse_upcitemdb(0, '');
+    foreach (array_unique($candidates) as $c) {
+      if ('' === $c) continue;
+      $response = wp_remote_get('https://api.upcitemdb.com/prod/trial/lookup?upc=' . rawurlencode($c), [
+        'timeout' => 6,
+        'user-agent' => $sources::USER_AGENT,
+        'headers' => [
+          'User-Agent' => $sources::USER_AGENT,
+          'Accept' => 'application/json'
+        ],
+      ]);
+      if (is_wp_error($response)) {
+        continue;
+      }
+      $parsed = $sources::parse_upcitemdb(
+        (int) wp_remote_retrieve_response_code($response),
+        (string) wp_remote_retrieve_body($response)
+      );
+      if ('found' === $parsed['status']) {
+        return $parsed;
+      }
+      $last = $parsed;
+    }
+    return $last;
+  }
+
+  /** Tier 10: Barcode Monster API. @return array status, source, product, price_hint */
+  private static function lookup_barcode_monster(string $code): array {
+    $sources = 'Xophz_Compass_Bazaar_Barcode_Sources';
+    $response = wp_remote_get($sources::barcode_monster_url($code), [
+      'timeout' => 5,
+      'user-agent' => $sources::USER_AGENT,
+      'headers' => ['Accept' => 'application/json'],
+    ]);
+    if (is_wp_error($response)) {
+      return ['status' => 'error', 'source' => 'barcodemonster', 'product' => null, 'price_hint' => null];
+    }
+    return $sources::parse_barcode_monster(
       (int) wp_remote_retrieve_response_code($response),
       (string) wp_remote_retrieve_body($response)
     );

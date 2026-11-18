@@ -199,6 +199,278 @@ class Xophz_Compass_Bazaar_Barcode_Sources {
     return $empty;
   }
 
+  /** True when the code represents an ISBN (13-digit 978/979 or 10-digit book code). */
+  public static function is_isbn( string $code ): bool {
+    $digits = (string) preg_replace( '/\D/', '', $code );
+    $len = strlen( $digits );
+    if ( 13 === $len && ( str_starts_with( $digits, '978' ) || str_starts_with( $digits, '979' ) ) ) {
+      return true;
+    }
+    return 10 === $len;
+  }
+
+  /** True when a US UPC begins with 3 (GS1 NDC drug code prefix). */
+  public static function is_ndc_candidate( string $code ): bool {
+    $digits = (string) preg_replace( '/\D/', '', $code );
+    $core = ltrim( $digits, '0' );
+    return ( 10 === strlen( $digits ) || 11 === strlen( $digits ) || 12 === strlen( $digits ) ) && str_starts_with( $core, '3' );
+  }
+
+  /** Open Library Books API URL. */
+  public static function open_library_url( string $isbn ): string {
+    $clean = (string) preg_replace( '/\D/', '', $isbn );
+    return 'https://openlibrary.org/api/books?bibkeys=ISBN:' . rawurlencode( $clean ) . '&format=json&jscmd=data';
+  }
+
+  /** Read one Open Library Books answer. */
+  public static function parse_open_library( int $status, string $body, string $isbn ): array {
+    $out = [ 'status' => 'error', 'source' => 'openlibrary', 'product' => null, 'price_hint' => null ];
+    if ( 404 === $status ) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    if ( 429 === $status ) {
+      $out['status'] = 'rate_limited';
+      return $out;
+    }
+    $data = json_decode( $body, true );
+    if ( 200 !== $status || ! is_array( $data ) ) {
+      return $out;
+    }
+    $clean = (string) preg_replace( '/\D/', '', $isbn );
+    $book = $data['ISBN:' . $clean] ?? ( reset( $data ) ?: null );
+    if ( ! is_array( $book ) ) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    $title = self::field( $book['title'] ?? '' );
+    if ( '' === $title ) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    $authors = [];
+    foreach ( is_array( $book['authors'] ?? null ) ? $book['authors'] : [] as $a ) {
+      $name = self::field( $a['name'] ?? '' );
+      if ( '' !== $name ) {
+        $authors[] = $name;
+      }
+    }
+    $brand = implode( ', ', $authors );
+    $image = self::field( $book['cover']['large'] ?? ( $book['cover']['medium'] ?? ( $book['cover']['small'] ?? '' ) ) );
+    $images = '' !== $image ? [ $image ] : [];
+    $category = self::field( $book['subjects'][0]['name'] ?? 'Books' );
+    $desc = self::field( $book['notes'] ?? ( $book['subtitle'] ?? '' ) );
+
+    $out['status'] = 'found';
+    $out['product'] = [
+      'title'       => $title,
+      'brand'       => $brand,
+      'description' => $desc,
+      'category'    => $category,
+      'image_url'   => $image,
+      'image_urls'  => $images,
+    ];
+    return $out;
+  }
+
+  /** Google Books API URL. */
+  public static function google_books_url( string $isbn ): string {
+    $clean = (string) preg_replace( '/\D/', '', $isbn );
+    return 'https://www.googleapis.com/books/v1/volumes?q=isbn:' . rawurlencode( $clean );
+  }
+
+  /** Read one Google Books answer. */
+  public static function parse_google_books( int $status, string $body ): array {
+    $out = [ 'status' => 'error', 'source' => 'googlebooks', 'product' => null, 'price_hint' => null ];
+    if ( 404 === $status ) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    if ( 429 === $status ) {
+      $out['status'] = 'rate_limited';
+      return $out;
+    }
+    $data = json_decode( $body, true );
+    if ( 200 !== $status || ! is_array( $data ) ) {
+      return $out;
+    }
+    $items = isset( $data['items'] ) && is_array( $data['items'] ) ? $data['items'] : [];
+    $item = isset( $items[0]['volumeInfo'] ) && is_array( $items[0]['volumeInfo'] ) ? $items[0]['volumeInfo'] : null;
+    if ( ! $item ) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    $title = self::field( $item['title'] ?? '' );
+    if ( '' === $title ) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    $authors = isset( $item['authors'] ) && is_array( $item['authors'] ) ? implode( ', ', array_map( [ __CLASS__, 'field' ], $item['authors'] ) ) : '';
+    $image = self::field( $item['imageLinks']['thumbnail'] ?? ( $item['imageLinks']['smallThumbnail'] ?? '' ) );
+    if ( str_starts_with( $image, 'http://' ) ) {
+      $image = 'https://' . substr( $image, 7 );
+    }
+    $images = '' !== $image ? [ $image ] : [];
+    $category = self::field( $item['categories'][0] ?? 'Books' );
+    $desc = self::field( $item['description'] ?? '' );
+
+    $out['status'] = 'found';
+    $out['product'] = [
+      'title'       => $title,
+      'brand'       => $authors,
+      'description' => $desc,
+      'category'    => $category,
+      'image_url'   => $image,
+      'image_urls'  => $images,
+    ];
+    return $out;
+  }
+
+  /** openFDA NDC Drug API URL. */
+  public static function open_fda_url( string $ndc ): string {
+    $clean = (string) preg_replace( '/\D/', '', $ndc );
+    return 'https://api.fda.gov/drug/ndc.json?search=packaging.package_ndc:"' . rawurlencode( $clean ) . '"&limit=1';
+  }
+
+  /** Read one openFDA NDC answer. */
+  public static function parse_open_fda( int $status, string $body ): array {
+    $out = [ 'status' => 'error', 'source' => 'openfda', 'product' => null, 'price_hint' => null ];
+    if ( 404 === $status ) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    if ( 429 === $status ) {
+      $out['status'] = 'rate_limited';
+      return $out;
+    }
+    $data = json_decode( $body, true );
+    if ( 200 !== $status || ! is_array( $data ) ) {
+      return $out;
+    }
+    $results = isset( $data['results'] ) && is_array( $data['results'] ) ? $data['results'] : [];
+    $r = isset( $results[0] ) && is_array( $results[0] ) ? $results[0] : null;
+    if ( ! $r ) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    $brand = self::field( $r['brand_name'] ?? '' );
+    $generic = self::field( $r['generic_name'] ?? '' );
+    $title = '' !== $brand ? $brand : $generic;
+    if ( '' === $title ) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    if ( '' !== $brand && '' !== $generic && false === stripos( $brand, $generic ) ) {
+      $title = $brand . ' (' . $generic . ')';
+    }
+    $labeler = self::field( $r['labeler_name'] ?? '' );
+    $dosage = self::field( $r['dosage_form'] ?? '' );
+    $route = isset( $r['route'] ) && is_array( $r['route'] ) ? self::field( $r['route'][0] ?? '' ) : '';
+    $desc = trim( $dosage . ( '' !== $route ? ' - ' . $route : '' ) );
+
+    $out['status'] = 'found';
+    $out['product'] = [
+      'title'       => $title,
+      'brand'       => $labeler,
+      'description' => $desc,
+      'category'    => 'Health & Medicine',
+      'image_url'   => '',
+      'image_urls'  => [],
+    ];
+    return $out;
+  }
+
+  /** Brocade.io Open Retail API URL. */
+  public static function brocade_url( string $code ): string {
+    $clean = (string) preg_replace( '/\D/', '', $code );
+    return 'https://www.brocade.io/api/items/' . rawurlencode( $clean );
+  }
+
+  /** Read one Brocade.io answer. */
+  public static function parse_brocade( int $status, string $body ): array {
+    $out = [ 'status' => 'error', 'source' => 'brocade', 'product' => null, 'price_hint' => null ];
+    if ( 404 === $status ) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    if ( 429 === $status ) {
+      $out['status'] = 'rate_limited';
+      return $out;
+    }
+    $data = json_decode( $body, true );
+    if ( 200 !== $status || ! is_array( $data ) ) {
+      return $out;
+    }
+    $title = self::field( $data['name'] ?? '' );
+    if ( '' === $title ) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    $brand = self::field( $data['brand_name'] ?? ( $data['brand'] ?? '' ) );
+    $category = self::field( $data['category'] ?? '' );
+    $desc = self::field( $data['description'] ?? '' );
+    $images = self::images( $data['images'] ?? [] );
+
+    $out['status'] = 'found';
+    $out['product'] = [
+      'title'       => $title,
+      'brand'       => $brand,
+      'description' => $desc,
+      'category'    => $category,
+      'image_url'   => $images[0] ?? '',
+      'image_urls'  => $images,
+    ];
+    return $out;
+  }
+
+  /** Barcode Monster API URL. */
+  public static function barcode_monster_url( string $code ): string {
+    $clean = (string) preg_replace( '/\D/', '', $code );
+    return 'https://barcode.monster/api/' . rawurlencode( $clean );
+  }
+
+  /** Read one Barcode Monster answer. */
+  public static function parse_barcode_monster( int $status, string $body ): array {
+    $out = [ 'status' => 'error', 'source' => 'barcodemonster', 'product' => null, 'price_hint' => null ];
+    if ( 404 === $status ) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    if ( 429 === $status ) {
+      $out['status'] = 'rate_limited';
+      return $out;
+    }
+    $data = json_decode( $body, true );
+    if ( 200 !== $status || ! is_array( $data ) ) {
+      return $out;
+    }
+    $statusNum = $data['status'] ?? null;
+    if ( 'not_found' === $statusNum || ( is_numeric( $statusNum ) && 0 === (int) $statusNum ) ) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    $title = self::field( $data['description'] ?? ( $data['title'] ?? '' ) );
+    if ( '' === $title ) {
+      $out['status'] = 'not_found';
+      return $out;
+    }
+    $brand = self::field( $data['company'] ?? ( $data['brand'] ?? '' ) );
+    $category = self::field( $data['class'] ?? '' );
+    $image = self::field( $data['image_url'] ?? '' );
+    $images = '' !== $image ? [ $image ] : [];
+
+    $out['status'] = 'found';
+    $out['product'] = [
+      'title'       => $title,
+      'brand'       => $brand,
+      'description' => '',
+      'category'    => $category,
+      'image_url'   => $image,
+      'image_urls'  => $images,
+    ];
+    return $out;
+  }
+
   /** A provider field as a trimmed plain string ('' for arrays and null). */
   public static function field( $value ): string {
     if ( ! is_scalar( $value ) ) {
@@ -208,3 +480,4 @@ class Xophz_Compass_Bazaar_Barcode_Sources {
     return trim( strip_tags( $text ) );
   }
 }
+
