@@ -10,6 +10,10 @@ All notable changes to the Compass Bazaar plugin. Newest first.
 - **UPCitemdb Header & Variant Fallback**: Hardened UPCitemdb querying with custom User-Agent and multi-length digit variations (12-digit UPC-A, 13-digit EAN).
 - **Parallel Domain Racing**: Upgraded client waterfall resolver with `raceProviders` parallel clustering across open databases (Open Food Facts + Brocade.io + Open Products), cutting lookup latency from 45s down to sub-second responses.
 
+### Added
+- **Amazon Search Scraper & Extended Waterfall**: Integrated pure-PHP Amazon search scraper into the barcode lookup waterfall, with anti-bot challenge detection, desktop browser header mimicry, and 4-second timeout. Added Amazon CDN domains to `IMAGE_HOSTS`.
+- **Waterfall Transparency & Negative Cache Optimization**: Reduced negative lookup cache TTL from 3 days to 5 minutes with on-demand cache bypass (`fresh` flag). Upgraded lookup responses to return `sources_tried` for full auditability.
+
 ### Fixed
 - **Camera Device Release & Re-Acquisition**: Resolved camera lock where subsequent scanner sessions reported no camera found until app reboot. Added hardware track termination (`track.stop()`), active stream registry, preemptive track clearance, and awaited asynchronous shutdown before dialog unmount.
 - **Quick Add Barcode & Description Persistence**: Quick Add preserves scanned or typed UPC codes when transitioning to manual naming, saves `_barcode` and `barcode` product post meta in WooCommerce along with SKU and GTIN, and guarantees draft descriptions from lookups are saved to new products.

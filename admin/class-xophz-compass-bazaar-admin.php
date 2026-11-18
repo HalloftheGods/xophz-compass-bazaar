@@ -376,45 +376,49 @@ class Xophz_Compass_Bazaar_Admin {
    *   product: title, brand, description, category, image_url (strings).
    *   price_hint: low, high (strings with 2 decimals), source.
    */
-  public static function global_barcode_lookup(string $barcode, bool $need_description = false): array {
+  public static function global_barcode_lookup(string $barcode, bool $need_description = false, bool $fresh = false): array {
     $code = Xophz_Compass_Bazaar_Barcode::normalize($barcode);
     $query = '' !== $code['normalized'] ? $code['normalized'] : $code['raw'];
-    $empty = ['status' => 'not_found', 'source' => '', 'product' => null, 'price_hint' => null, 'cached' => false];
+    $empty = ['status' => 'not_found', 'source' => '', 'product' => null, 'price_hint' => null, 'cached' => false, 'sources_tried' => []];
     if ('' === $query) {
       return $empty;
     }
 
     $cache_key = self::LOOKUP_CACHE_PREFIX . md5($query);
-    $memory = Xophz_Compass_Bazaar_Barcode_Memory::find($query);
-    if (null !== $memory) {
-      $description = '' !== (string) ($memory['description'] ?? '') ? (string) $memory['description'] : self::cached_description($cache_key);
-      if ('' !== $description || !$need_description) {
-        return array_merge($empty, [
-          'status' => 'found',
-          'source' => 'memory',
-          'product' => [
-            'title' => $memory['title'],
-            'brand' => $memory['brand'],
-            'description' => $description,
-            'category' => '',
-            'image_url' => $memory['image_url'],
-            'image_urls' => '' !== $memory['image_url'] ? [$memory['image_url']] : [],
-          ],
-        ]);
+    if (!$fresh) {
+      $memory = Xophz_Compass_Bazaar_Barcode_Memory::find($query);
+      if (null !== $memory) {
+        $description = '' !== (string) ($memory['description'] ?? '') ? (string) $memory['description'] : self::cached_description($cache_key);
+        if ('' !== $description || !$need_description) {
+          return array_merge($empty, [
+            'status' => 'found',
+            'source' => 'memory',
+            'sources_tried' => ['local_memory'],
+            'product' => [
+              'title' => $memory['title'],
+              'brand' => $memory['brand'],
+              'description' => $description,
+              'category' => '',
+              'image_url' => $memory['image_url'],
+              'image_urls' => '' !== $memory['image_url'] ? [$memory['image_url']] : [],
+            ],
+          ]);
+        }
       }
-    }
 
-    $cached = get_transient($cache_key);
-    if (is_array($cached) && isset($cached['status'])) {
-      $cached['cached'] = true;
-      return array_merge($empty, $cached);
+      $cached = get_transient($cache_key);
+      if (is_array($cached) && isset($cached['status'])) {
+        $cached['cached'] = true;
+        return array_merge($empty, $cached);
+      }
     }
 
     $open_facts_code = '' !== $code['normalized'] ? Xophz_Compass_Bazaar_Barcode::off_query_code($code) : $query;
     $result = array_merge($empty, self::ask_providers($open_facts_code, $query));
+    $negative_ttl = (int) apply_filters('bazaar_barcode_negative_cache_ttl', 5 * MINUTE_IN_SECONDS);
     $ttl = [
       'found' => 30 * DAY_IN_SECONDS,
-      'not_found' => 3 * DAY_IN_SECONDS,
+      'not_found' => $negative_ttl,
     ][$result['status']] ?? 15 * MINUTE_IN_SECONDS;
     $store = $result;
     unset($store['cached']);
@@ -478,24 +482,31 @@ class Xophz_Compass_Bazaar_Admin {
 
     // Tier 8: Brocade.io Open Retail Database
     $brocade = self::lookup_brocade($query);
-    if ('found' === $brocade['status']) {
-      return $brocade;
-    }
     $outcomes[] = $brocade;
+    if ('found' === $brocade['status']) {
+      return $sources::merge($outcomes);
+    }
 
     // Tier 9: UPCitemdb Trial API (100 req/day quota protected)
     $upc = self::lookup_upcitemdb($query);
-    if ('found' === $upc['status']) {
-      return $upc;
-    }
     $outcomes[] = $upc;
+    if ('found' === $upc['status']) {
+      return $sources::merge($outcomes);
+    }
 
     // Tier 10: Barcode Monster (Long-tail public database)
     $monster = self::lookup_barcode_monster($query);
-    if ('found' === $monster['status']) {
-      return $monster;
-    }
     $outcomes[] = $monster;
+    if ('found' === $monster['status']) {
+      return $sources::merge($outcomes);
+    }
+
+    // Tier 11: Amazon Search Scraper
+    $amazon = self::lookup_amazon($query);
+    $outcomes[] = $amazon;
+    if ('found' === $amazon['status']) {
+      return $sources::merge($outcomes);
+    }
 
     return $sources::merge($outcomes);
   }
@@ -621,6 +632,15 @@ class Xophz_Compass_Bazaar_Admin {
       (int) wp_remote_retrieve_response_code($response),
       (string) wp_remote_retrieve_body($response)
     );
+  }
+
+  /** Tier 11: Amazon Search Scraper. @return array status, source, product, price_hint */
+  private static function lookup_amazon(string $code): array {
+    if ( function_exists( 'apply_filters' ) && ! apply_filters( 'bazaar_barcode_amazon_enabled', true ) ) {
+      return [ 'status' => 'not_found', 'source' => 'amazon', 'product' => null, 'price_hint' => null ];
+    }
+    require_once dirname( __DIR__ ) . '/includes/class-xophz-compass-bazaar-barcode-amazon.php';
+    return Xophz_Compass_Bazaar_Barcode_Amazon::search( $code );
   }
 
   /** update_product_stock: see Xophz_Compass_Bazaar_Admin_Product_Stock. */

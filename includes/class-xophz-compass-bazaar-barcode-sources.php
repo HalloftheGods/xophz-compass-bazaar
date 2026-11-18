@@ -34,7 +34,7 @@ class Xophz_Compass_Bazaar_Barcode_Sources {
   /** Asked together when Open Food Facts has no record. */
   const OPEN_FACTS_OTHERS = [ 'openbeautyfacts', 'openpetfoodfacts', 'openproductsfacts' ];
 
-  /** The Open*Facts picture hosts, all served over https. */
+  /** The Open*Facts and retail picture hosts, all served over https. */
   const IMAGE_HOSTS = [
     'images.openfoodfacts.org',
     'static.openfoodfacts.org',
@@ -44,7 +44,20 @@ class Xophz_Compass_Bazaar_Barcode_Sources {
     'static.openpetfoodfacts.org',
     'images.openproductsfacts.org',
     'static.openproductsfacts.org',
+    'm.media-amazon.com',
+    'images-na.ssl-images-amazon.com',
+    'images-amazon.com',
+    'api.upcitemdb.com',
   ];
+
+  /** Return the allowed image hosts, extensible via filter. */
+  public static function image_hosts(): array {
+    $hosts = self::IMAGE_HOSTS;
+    if ( function_exists( 'apply_filters' ) ) {
+      $hosts = (array) apply_filters( 'bazaar_barcode_image_hosts', $hosts );
+    }
+    return $hosts;
+  }
 
   /** The v2 product URL of an Open*Facts source. */
   public static function open_facts_url( string $source, string $code ): string {
@@ -177,20 +190,28 @@ class Xophz_Compass_Bazaar_Barcode_Sources {
    * rate_limited if any source got a 429; otherwise error.
    *
    * @param array[] $outcomes Each with at least a status.
-   * @return array status, source, product, price_hint
+   * @return array status, source, product, price_hint, sources_tried
    */
   public static function merge( array $outcomes ): array {
-    $empty   = [ 'status' => 'error', 'source' => '', 'product' => null, 'price_hint' => null ];
+    $empty   = [ 'status' => 'error', 'source' => '', 'product' => null, 'price_hint' => null, 'sources_tried' => [] ];
     $missing = 0;
     $limited = false;
+    $tried   = [];
     foreach ( $outcomes as $outcome ) {
       $status = $outcome['status'] ?? 'error';
-      if ( 'found' === $status ) {
-        return array_merge( $empty, $outcome );
+      $src    = $outcome['source'] ?? '';
+      if ( '' !== $src && ! in_array( $src, $tried, true ) ) {
+        $tried[] = $src;
       }
-      $missing += 'not_found' === $status ? 1 : 0;
+      if ( 'found' === $status ) {
+        $found = array_merge( $empty, $outcome );
+        $found['sources_tried'] = $tried;
+        return $found;
+      }
+      $missing += ( 'not_found' === $status || 'bot_blocked' === $status ) ? 1 : 0;
       $limited  = $limited || 'rate_limited' === $status;
     }
+    $empty['sources_tried'] = $tried;
     if ( [] !== $outcomes && count( $outcomes ) === $missing ) {
       $empty['status'] = 'not_found';
     } elseif ( $limited ) {

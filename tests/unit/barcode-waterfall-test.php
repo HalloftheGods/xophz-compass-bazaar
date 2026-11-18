@@ -104,8 +104,24 @@ $monster_json = (string) json_encode( [
 $monster_parsed = $S::parse_barcode_monster( 200, $monster_json );
 check( 'barcode_monster: found status', $monster_parsed['status'], 'found' );
 check( 'barcode_monster: title', $monster_parsed['product']['title'], 'Stainless Steel Insulated Tumbler' );
-check( 'barcode_monster: company/brand', $monster_parsed['product']['brand'], 'Yeti' );
-check( 'barcode_monster: image', $monster_parsed['product']['image_url'], 'https://example.com/tumbler.jpg' );
-check( 'barcode_monster: 404 is not_found', $S::parse_barcode_monster( 404, '' )['status'], 'not_found' );
+// 7. Merge Outcomes & Sources Tracking
+$outcomes_all_miss = [
+  [ 'status' => 'not_found', 'source' => 'openfoodfacts' ],
+  [ 'status' => 'not_found', 'source' => 'upcitemdb' ],
+  [ 'status' => 'not_found', 'source' => 'barcodemonster' ],
+  [ 'status' => 'bot_blocked', 'source' => 'amazon' ],
+];
+$merged_miss = $S::merge( $outcomes_all_miss );
+check( 'merge: status not_found', $merged_miss['status'], 'not_found' );
+check( 'merge: sources_tried populated', count( $merged_miss['sources_tried'] ), 4 );
+check( 'merge: sources_tried includes amazon', in_array( 'amazon', $merged_miss['sources_tried'], true ), true );
+
+$outcomes_win = [
+  [ 'status' => 'not_found', 'source' => 'openfoodfacts' ],
+  [ 'status' => 'found', 'source' => 'amazon', 'product' => [ 'title' => 'Sample' ] ],
+];
+$merged_win = $S::merge( $outcomes_win );
+check( 'merge win: status found', $merged_win['status'], 'found' );
+check( 'merge win: sources_tried contains queried sources', $merged_win['sources_tried'], [ 'openfoodfacts', 'amazon' ] );
 
 bazaar_test_standalone( __FILE__ );

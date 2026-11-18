@@ -139,8 +139,9 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
   public function quickLookup() {
     $this->authorize( 'bazaar_quick_lookup' );
     $args = Xophz_Compass::get_input_json();
+    $fresh = ! empty( $args->fresh );
     try {
-      $response = $this->lookup( isset( $args->barcode ) ? $args->barcode : '' );
+      $response = $this->lookup( isset( $args->barcode ) ? $args->barcode : '', $fresh );
     } catch ( \Throwable $e ) {
       error_log( 'bazaar_quick_lookup: ' . $e->getMessage() );
       $response = self::failure( 'failed', 'That did not work. Try again.' );
@@ -249,17 +250,18 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
   /* Lookup                                                              */
   /* ------------------------------------------------------------------ */
 
-  private function lookup( $raw ): array {
+  private function lookup( $raw, bool $fresh = false ): array {
     $code = Xophz_Compass_Bazaar_Barcode::normalize( is_scalar( $raw ) ? sanitize_text_field( (string) $raw ) : '' );
     if ( '' === $code['raw'] ) {
       return self::failure( 'invalid_barcode', 'Scan or type the numbers under the bars.' );
     }
     $out = [
-      'success'    => true,
-      'barcode'    => [ 'raw' => $code['raw'], 'normalized' => $code['normalized'], 'valid' => $code['valid'] ],
-      'existing'   => null,
-      'draft'      => null,
-      'price_hint' => null,
+      'success'       => true,
+      'barcode'       => [ 'raw' => $code['raw'], 'normalized' => $code['normalized'], 'valid' => $code['valid'] ],
+      'existing'      => null,
+      'draft'         => null,
+      'price_hint'    => null,
+      'sources_tried' => [],
     ];
 
     $product_id = self::find_existing( $code );
@@ -277,7 +279,10 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
 
     // Only a code with a valid check digit is worth a provider call; a typo is not.
     if ( $code['valid'] ) {
-      $found = Xophz_Compass_Bazaar_Admin::global_barcode_lookup( $code['normalized'] );
+      $found = Xophz_Compass_Bazaar_Admin::global_barcode_lookup( $code['normalized'], false, $fresh );
+      if ( isset( $found['sources_tried'] ) && is_array( $found['sources_tried'] ) ) {
+        $out['sources_tried'] = $found['sources_tried'];
+      }
       if ( 'found' === $found['status'] && is_array( $found['product'] ) ) {
         $p      = $found['product'];
         $images = Xophz_Compass_Bazaar_Barcode_Image::clean_list( $p['image_urls'] ?? [ $p['image_url'] ] );
