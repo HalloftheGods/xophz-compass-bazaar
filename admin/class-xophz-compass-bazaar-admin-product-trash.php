@@ -418,8 +418,66 @@ class Xophz_Compass_Bazaar_Admin_Product_Trash {
       array_merge( array_map( 'strval', $ids ), $statuses )
     ) );
 
+    // If query failed on HPOS table (e.g. table not yet migrated), retry against posts table.
+    if ( null === $count && $source['table'] !== $wpdb->posts ) {
+      $fallback = self::order_source( false, $wpdb->prefix, $wpdb->posts );
+      $fallback_status_clause = $statuses ? "AND o.{$fallback['status']} IN ($status_marks)" : '';
+      $count = $wpdb->get_var( $wpdb->prepare(
+        "SELECT COUNT(DISTINCT oi.order_id)
+         FROM {$wpdb->prefix}woocommerce_order_items oi
+         INNER JOIN {$wpdb->prefix}woocommerce_order_itemmeta oim ON oim.order_item_id = oi.order_item_id
+         INNER JOIN {$fallback['table']} o ON o.{$fallback['id']} = oi.order_id
+         WHERE oi.order_item_type = 'line_item'
+           AND oim.meta_key IN ('_product_id', '_variation_id')
+           AND oim.meta_value IN ($id_marks)
+           AND o.{$fallback['type']} = 'shop_order'
+           $fallback_status_clause",
+        array_merge( array_map( 'strval', $ids ), $statuses )
+      ) );
+    }
+
+    // If direct SQL failed, check open orders via native WooCommerce API if available.
+    if ( null === $count && function_exists( 'wc_get_orders' ) ) {
+      try {
+        $wc_statuses = null === $statuses ? null : self::OPEN_ORDER_STATUSES;
+        $order_args  = [ 'limit' => 200, 'return' => 'objects' ];
+        if ( $wc_statuses ) {
+          $order_args['status'] = $wc_statuses;
+        }
+        $orders = wc_get_orders( $order_args );
+        if ( is_array( $orders ) ) {
+          $count = 0;
+          foreach ( $orders as $order ) {
+            if ( ! is_object( $order ) || ! method_exists( $order, 'get_items' ) ) {
+              continue;
+            }
+            foreach ( $order->get_items() as $item ) {
+              $pid = method_exists( $item, 'get_product_id' ) ? (int) $item->get_product_id() : 0;
+              $vid = method_exists( $item, 'get_variation_id' ) ? (int) $item->get_variation_id() : 0;
+              if ( in_array( $pid, $ids, true ) || in_array( $vid, $ids, true ) ) {
+                $count++;
+                break;
+              }
+            }
+          }
+        }
+      } catch ( \Throwable $ignored ) {
+        // Fall through to error
+      }
+    }
+
+    // If order items table does not exist in this database, no orders exist.
+    if ( null === $count && method_exists( $wpdb, 'esc_like' ) && ! empty( $wpdb->last_error ) ) {
+      if ( false !== stripos( $wpdb->last_error, "doesn't exist" ) || false !== stripos( $wpdb->last_error, "does not exist" ) ) {
+        if ( false !== stripos( $wpdb->last_error, 'woocommerce_order_items' ) ) {
+          return 0;
+        }
+      }
+    }
+
     if ( null === $count ) {
-      throw new \Exception( 'The open orders could not be checked, so nothing was changed. Try again.' );
+      $detail = ! empty( $wpdb->last_error ) ? ' (' . $wpdb->last_error . ')' : '';
+      throw new \Exception( 'The open orders could not be checked, so nothing was changed. Try again.' . $detail );
     }
     return (int) $count;
   }
