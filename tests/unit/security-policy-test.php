@@ -30,8 +30,8 @@ sort( $bazaar_scanned );
 $bazaar_policy = array_keys( $SP::AJAX );
 sort( $bazaar_policy );
 
-check( 'policy: the scan finds 71 distinct actions', count( $bazaar_scanned ), 71 );
-check( 'policy: 71 actions in the policy', count( $SP::AJAX ), 71 );
+check( 'policy: the scan finds 72 distinct actions', count( $bazaar_scanned ), 72 );
+check( 'policy: 72 actions in the policy', count( $SP::AJAX ), 72 );
 check( 'policy: registered actions missing from the policy', array_values( array_diff( $bazaar_scanned, $bazaar_policy ) ), [] );
 check( 'policy: policy actions no longer registered', array_values( array_diff( $bazaar_policy, $bazaar_scanned ) ), [] );
 check( 'policy: keys have no wp_ajax_ prefix', array_values( array_filter( $bazaar_policy, function ( $a ) {

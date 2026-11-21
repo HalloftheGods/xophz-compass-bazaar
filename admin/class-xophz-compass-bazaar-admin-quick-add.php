@@ -77,11 +77,12 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
   private $version;
 
   public $action_hooks = [
-    'wp_ajax_bazaar_quick_lookup' => 'quickLookup',
-    'wp_ajax_bazaar_quick_save'   => 'quickSave',
-    'wp_ajax_bazaar_quick_undo'   => 'quickUndo',
-    'wp_ajax_bazaar_quick_recent' => 'quickRecent',
-    'wp_ajax_bazaar_quick_image'  => 'quickImage',
+    'wp_ajax_bazaar_quick_lookup'      => 'quickLookup',
+    'wp_ajax_bazaar_quick_save'        => 'quickSave',
+    'wp_ajax_bazaar_quick_undo'        => 'quickUndo',
+    'wp_ajax_bazaar_quick_recent'      => 'quickRecent',
+    'wp_ajax_bazaar_quick_image'       => 'quickImage',
+    'wp_ajax_bazaar_quick_ai_identify' => 'quickAiIdentify',
   ];
 
   const MODES              = [ 'add', 'create', 'set' ];
@@ -118,11 +119,12 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
   public static function policy(): array {
     $c = 'Xophz_Compass_Bazaar_Security_Capabilities';
     return [
-      'bazaar_quick_lookup' => [ $c::MANAGE_CATALOG, $c::MANAGE_STOCK, $c::RECEIVE ],
-      'bazaar_quick_save'   => [ $c::MANAGE_STOCK, $c::MANAGE_CATALOG ],
-      'bazaar_quick_undo'   => [ $c::MANAGE_STOCK, $c::MANAGE_CATALOG ],
-      'bazaar_quick_recent' => [ $c::MANAGE_CATALOG, $c::MANAGE_STOCK, $c::RECEIVE ],
-      'bazaar_quick_image'  => [ $c::MANAGE_CATALOG, $c::MANAGE_STOCK, $c::RECEIVE ],
+      'bazaar_quick_lookup'      => [ $c::MANAGE_CATALOG, $c::MANAGE_STOCK, $c::RECEIVE ],
+      'bazaar_quick_save'        => [ $c::MANAGE_STOCK, $c::MANAGE_CATALOG ],
+      'bazaar_quick_undo'        => [ $c::MANAGE_STOCK, $c::MANAGE_CATALOG ],
+      'bazaar_quick_recent'      => [ $c::MANAGE_CATALOG, $c::MANAGE_STOCK, $c::RECEIVE ],
+      'bazaar_quick_image'       => [ $c::MANAGE_CATALOG, $c::MANAGE_STOCK, $c::RECEIVE ],
+      'bazaar_quick_ai_identify' => [ $c::MANAGE_CATALOG, $c::MANAGE_STOCK, $c::RECEIVE ],
     ];
   }
 
@@ -244,6 +246,32 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       $picture = null;
     }
     self::respond( $picture ? [ 'success' => true ] + $picture : self::failure( 'no_picture', 'That picture could not be shown.' ) );
+  }
+
+  /** AJAX bazaar_quick_ai_identify. Uses WP/Compass AI Connectors to identify a product from its photo. */
+  public function quickAiIdentify() {
+    $this->authorize( 'bazaar_quick_ai_identify' );
+    $args       = Xophz_Compass::get_input_json();
+    $image_data = isset( $args->image_data ) && is_string( $args->image_data ) ? trim( $args->image_data ) : '';
+    $barcode    = isset( $args->barcode ) && is_string( $args->barcode ) ? sanitize_text_field( $args->barcode ) : '';
+
+    if ( ! preg_match( '#^data:(image/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=\s]+)$#i', $image_data, $matches ) ) {
+      self::respond( self::failure( 'invalid_image', 'Take a clear product photo first.' ) );
+    }
+
+    $mime = strtolower( $matches[1] );
+    $b64  = preg_replace( '/\s+/', '', $matches[2] );
+    if ( '' === $b64 ) {
+      self::respond( self::failure( 'invalid_image', 'Take a clear product photo first.' ) );
+    }
+
+    try {
+      $result = self::ai_identify_from_photo( $mime, $b64, $barcode );
+      self::respond( $result );
+    } catch ( \Throwable $e ) {
+      error_log( 'bazaar_quick_ai_identify: ' . $e->getMessage() );
+      self::respond( self::failure( 'ai_failed', 'AI identification failed. Try again or enter details manually.' ) );
+    }
   }
 
   /* ------------------------------------------------------------------ */
@@ -462,9 +490,10 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       if ( '' === $title ) {
         return self::failure( 'title_required', 'A new item needs a short name.' );
       }
-      $images = self::images_to_try( $args->image_url ?? null, $barcode, $user_id );
+      $images      = self::images_to_try( $args->image_url ?? null, $barcode, $user_id );
       $description = isset( $args->description ) && is_string( $args->description ) ? sanitize_textarea_field( $args->description ) : '';
-      return $this->apply_create( $barcode, $title, $price, $qty, $images, $uuid, $user_id, $description );
+      $image_data  = isset( $args->image_data ) && is_string( $args->image_data ) ? trim( $args->image_data ) : '';
+      return $this->apply_create( $barcode, $title, $price, $qty, $images, $uuid, $user_id, $description, $image_data );
     }
 
     $product_id = isset( $args->product_id ) && is_numeric( $args->product_id ) ? (int) $args->product_id : 0;
@@ -556,7 +585,7 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
   }
 
   /** mode create: a new simple product, published, managing stock. */
-  private function apply_create( array $barcode, string $title, float $price, float $qty, array $images, string $uuid, int $user_id, string $client_description = '' ): array {
+  private function apply_create( array $barcode, string $title, float $price, float $qty, array $images, string $uuid, int $user_id, string $client_description = '', string $image_data = '' ): array {
     self::require_cap( Xophz_Compass_Bazaar_Security_Capabilities::MANAGE_CATALOG );
     self::require_cap( Xophz_Compass_Bazaar_Security_Capabilities::MANAGE_STOCK );
 
@@ -604,7 +633,10 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
         update_post_meta( $product_id, '_barcode', $barcode_val );
         update_post_meta( $product_id, 'barcode', $barcode_val );
       }
-      $image = self::attach_first_image( $product_id, $images, $title );
+      $image = '' !== $image_data ? self::store_uploaded_image( $product_id, $image_data, $title ) : '';
+      if ( '' === $image ) {
+        $image = self::attach_first_image( $product_id, $images, $title );
+      }
       // Same path as saveProduct: save first, then write the quantity.
       Xophz_Compass_Bazaar_Admin_Product_Stock::set_quantity(
         $product_id,
@@ -1254,6 +1286,326 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
     $product->set_image_id( $attachment_id );
     $product->save();
     return true;
+  }
+
+  /** Save a captured data-URI product photo into the Media Library and attach it. */
+  private static function store_uploaded_image( int $product_id, string $data, string $title ): string {
+    $raw   = preg_replace( '#^data:image/[\w.+-]+;base64,#i', '', $data );
+    $bytes = is_string( $raw ) ? base64_decode( $raw, true ) : false;
+    if ( ! is_string( $bytes ) || '' === $bytes || strlen( $bytes ) > 8 * 1024 * 1024 ) {
+      return '';
+    }
+    $extensions = [
+      'image/jpeg' => 'jpg',
+      'image/png'  => 'png',
+      'image/webp' => 'webp',
+      'image/gif'  => 'gif',
+    ];
+    $tmp = wp_tempnam( 'quick-add-photo' );
+    if ( ! $tmp ) {
+      return '';
+    }
+    file_put_contents( $tmp, $bytes );
+    $mime = wp_get_image_mime( $tmp );
+    if ( ! $mime || ! isset( $extensions[ $mime ] ) ) {
+      wp_delete_file( $tmp );
+      return '';
+    }
+    $upload_dir = wp_upload_dir();
+    $slug       = sanitize_title( $title ?: 'product-photo' ) ?: 'product-photo';
+    $filename   = wp_unique_filename( $upload_dir['path'], $slug . '-' . time() . '.' . $extensions[ $mime ] );
+    $file_path  = $upload_dir['path'] . '/' . $filename;
+    $moved      = @copy( $tmp, $file_path );
+    wp_delete_file( $tmp );
+    if ( ! $moved ) {
+      return '';
+    }
+    $attach_id = wp_insert_attachment( [
+      'post_mime_type' => $mime,
+      'post_title'     => '' !== $title ? $title : sanitize_file_name( $filename ),
+      'post_content'   => '',
+      'post_status'    => 'inherit',
+    ], $file_path, $product_id );
+    if ( ! $attach_id || is_wp_error( $attach_id ) ) {
+      return '';
+    }
+    require_once ABSPATH . 'wp-admin/includes/image.php';
+    wp_update_attachment_metadata( $attach_id, wp_generate_attachment_metadata( $attach_id, $file_path ) );
+    $product = self::fresh( $product_id );
+    $product->set_image_id( (int) $attach_id );
+    $product->save();
+    return (string) ( wp_get_attachment_url( (int) $attach_id ) ?: '' );
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* AI Connectors Vision Identification                                  */
+  /* ------------------------------------------------------------------ */
+
+  /** Identify a product title, short description, MSRP, and category from a photo. */
+  private static function ai_identify_from_photo( string $mime, string $b64, string $barcode = '' ): array {
+    $prompt = self::build_ai_vision_prompt( $barcode );
+    $gemini = self::connector_key( 'google' );
+    $openai = self::connector_key( 'openai' );
+    $claude = self::connector_key( 'anthropic' );
+
+    if ( '' === $gemini && '' === $openai && '' === $claude ) {
+      return self::failure(
+        'ai_not_configured',
+        'No AI Connector API key is configured. Add Gemini, OpenAI, or Anthropic under Settings > Connectors.'
+      );
+    }
+
+    $last_error = '';
+    $attempts   = [
+      'google'    => '' !== $gemini ? fn() => self::call_gemini_vision( $gemini, $prompt, $mime, $b64 ) : null,
+      'openai'    => '' !== $openai ? fn() => self::call_openai_vision( $openai, $prompt, $mime, $b64 ) : null,
+      'anthropic' => '' !== $claude ? fn() => self::call_anthropic_vision( $claude, $prompt, $mime, $b64 ) : null,
+    ];
+
+    foreach ( $attempts as $provider => $runner ) {
+      if ( null === $runner ) {
+        continue;
+      }
+      $raw = $runner();
+      if ( is_wp_error( $raw ) ) {
+        $last_error = $raw->get_error_message();
+        continue;
+      }
+      $draft = self::parse_ai_product_json( $raw );
+      if ( null !== $draft ) {
+        return [
+          'success'    => true,
+          'provider'   => $provider,
+          'draft'      => $draft,
+          'price_hint' => null !== $draft['msrp'] ? [
+            'low'    => self::price_out( (float) $draft['msrp'] ),
+            'high'   => null,
+            'source' => 'ai',
+          ] : null,
+        ];
+      }
+      $last_error = 'AI returned an unreadable product suggestion.';
+    }
+
+    return self::failure(
+      'ai_failed',
+      '' !== $last_error ? $last_error : 'AI could not identify this item. Try again or enter details manually.'
+    );
+  }
+
+  private static function build_ai_vision_prompt( string $barcode = '' ): string {
+    $barcode_note = '' !== $barcode ? " Scanned or typed barcode: {$barcode}." : '';
+    return 'You are a retail store merchandising assistant identifying an item from a product photo for POS intake.'
+      . $barcode_note
+      . ' Inspect the item, brand, model, size/count, and any visible packaging/tags.'
+      . ' Return ONLY valid JSON with keys:'
+      . ' "title" (concise retail product title under 90 characters, include brand/variant when clear),'
+      . ' "description" (1-2 factual sentences describing the item and key specs for an online catalog),'
+      . ' "msrp" (estimated US retail MSRP in USD as a positive number like 19.99, or null if uncertain),'
+      . ' "category" (short 1-2 word retail category like "Snacks", "Toys", "Electronics", or "").';
+  }
+
+  private static function connector_key( string $connector_id ): string {
+    if ( 'google' === $connector_id && class_exists( 'Xophz_Compass_HTTP' ) ) {
+      $key = Xophz_Compass_HTTP::get_gemini_api_key();
+      if ( is_string( $key ) && '' !== $key ) {
+        return $key;
+      }
+    }
+    if ( class_exists( 'Xophz_Compass_Connector_Key' ) ) {
+      return Xophz_Compass_Connector_Key::get( $connector_id );
+    }
+    return '';
+  }
+
+  private static function connector_model( string $connector_id, string $fallback ): string {
+    $model = '';
+    if ( function_exists( 'wp_get_connectors' ) ) {
+      $connectors = wp_get_connectors();
+      $setting    = $connectors[ $connector_id ]['options']['model']['setting_name'] ?? '';
+      if ( is_string( $setting ) && '' !== $setting ) {
+        $model = (string) get_option( $setting, '' );
+      }
+    }
+    $model = preg_replace( '/[^A-Za-z0-9._-]/', '', (string) $model );
+    if ( 'google' === $connector_id && ( '' === $model || false !== strpos( $model, 'gemini-2.0' ) || false !== strpos( $model, 'gemini-2.5' ) ) ) {
+      return $fallback;
+    }
+    return '' !== $model ? $model : $fallback;
+  }
+
+  private static function call_gemini_vision( string $api_key, string $prompt, string $mime, string $b64 ) {
+    $primary = self::connector_model( 'google', 'gemini-3.6-flash' );
+    $models  = array_values( array_unique( [ $primary, 'gemini-3.6-flash', 'gemini-3.5-flash' ] ) );
+    $payload = [
+      'contents'         => [
+        [
+          'parts' => [
+            [ 'text' => $prompt ],
+            [
+              'inline_data' => [
+                'mime_type' => $mime,
+                'data'      => $b64,
+              ],
+            ],
+          ],
+        ],
+      ],
+      'generationConfig' => [
+        'responseMimeType' => 'application/json',
+        'temperature'      => 0.2,
+      ],
+    ];
+
+    $last_error = new WP_Error( 'ai_failed', 'Gemini did not answer.' );
+    foreach ( $models as $model ) {
+      $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent";
+      $response = wp_safe_remote_post( $endpoint, [
+        'headers' => [
+          'Content-Type'   => 'application/json',
+          'x-goog-api-key' => $api_key,
+        ],
+        'body'    => wp_json_encode( $payload ),
+        'timeout' => 30,
+      ] );
+      if ( is_wp_error( $response ) ) {
+        $last_error = $response;
+        continue;
+      }
+      $code = (int) wp_remote_retrieve_response_code( $response );
+      $body = (string) wp_remote_retrieve_body( $response );
+      if ( in_array( $code, [ 404, 429, 503 ], true ) ) {
+        $last_error = new WP_Error( 'gemini_retryable', "Gemini HTTP {$code}" );
+        continue;
+      }
+      if ( $code < 200 || $code >= 300 ) {
+        $err_data = json_decode( $body, true );
+        $msg      = is_array( $err_data ) ? (string) ( $err_data['error']['message'] ?? "Gemini HTTP {$code}" ) : "Gemini HTTP {$code}";
+        return new WP_Error( 'gemini_http_error', $msg );
+      }
+      $decoded = json_decode( $body, true );
+      $text    = is_array( $decoded ) ? (string) ( $decoded['candidates'][0]['content']['parts'][0]['text'] ?? '' ) : '';
+      if ( '' !== $text ) {
+        return $text;
+      }
+      $last_error = new WP_Error( 'gemini_empty', 'Gemini returned an empty response.' );
+    }
+    return $last_error;
+  }
+
+  private static function call_openai_vision( string $api_key, string $prompt, string $mime, string $b64 ) {
+    $model    = self::connector_model( 'openai', 'gpt-4o-mini' );
+    $response = wp_safe_remote_post( 'https://api.openai.com/v1/chat/completions', [
+      'headers' => [
+        'Authorization' => 'Bearer ' . $api_key,
+        'Content-Type'  => 'application/json',
+      ],
+      'body'    => wp_json_encode( [
+        'model'           => $model,
+        'temperature'     => 0.2,
+        'response_format' => [ 'type' => 'json_object' ],
+        'messages'        => [
+          [
+            'role'    => 'user',
+            'content' => [
+              [ 'type' => 'text', 'text' => $prompt ],
+              [ 'type' => 'image_url', 'image_url' => [ 'url' => "data:{$mime};base64,{$b64}" ] ],
+            ],
+          ],
+        ],
+      ] ),
+      'timeout' => 30,
+    ] );
+    if ( is_wp_error( $response ) ) {
+      return $response;
+    }
+    $code    = (int) wp_remote_retrieve_response_code( $response );
+    $body    = (string) wp_remote_retrieve_body( $response );
+    $decoded = json_decode( $body, true );
+    if ( $code < 200 || $code >= 300 ) {
+      $msg = is_array( $decoded ) ? (string) ( $decoded['error']['message'] ?? "OpenAI HTTP {$code}" ) : "OpenAI HTTP {$code}";
+      return new WP_Error( 'openai_http_error', $msg );
+    }
+    $text = is_array( $decoded ) ? (string) ( $decoded['choices'][0]['message']['content'] ?? '' ) : '';
+    return '' !== $text ? $text : new WP_Error( 'openai_empty', 'OpenAI returned an empty response.' );
+  }
+
+  private static function call_anthropic_vision( string $api_key, string $prompt, string $mime, string $b64 ) {
+    $model    = self::connector_model( 'anthropic', 'claude-sonnet-4-20250514' );
+    $response = wp_safe_remote_post( 'https://api.anthropic.com/v1/messages', [
+      'headers' => [
+        'x-api-key'         => $api_key,
+        'anthropic-version' => '2023-06-01',
+        'content-type'      => 'application/json',
+      ],
+      'body'    => wp_json_encode( [
+        'model'      => $model,
+        'max_tokens' => 400,
+        'messages'   => [
+          [
+            'role'    => 'user',
+            'content' => [
+              [
+                'type'   => 'image',
+                'source' => [
+                  'type'       => 'base64',
+                  'media_type' => $mime,
+                  'data'       => $b64,
+                ],
+              ],
+              [ 'type' => 'text', 'text' => $prompt ],
+            ],
+          ],
+        ],
+      ] ),
+      'timeout' => 30,
+    ] );
+    if ( is_wp_error( $response ) ) {
+      return $response;
+    }
+    $code    = (int) wp_remote_retrieve_response_code( $response );
+    $body    = (string) wp_remote_retrieve_body( $response );
+    $decoded = json_decode( $body, true );
+    if ( $code < 200 || $code >= 300 ) {
+      $msg = is_array( $decoded ) ? (string) ( $decoded['error']['message'] ?? "Anthropic HTTP {$code}" ) : "Anthropic HTTP {$code}";
+      return new WP_Error( 'anthropic_http_error', $msg );
+    }
+    $text = is_array( $decoded ) ? (string) ( $decoded['content'][0]['text'] ?? '' ) : '';
+    return '' !== $text ? $text : new WP_Error( 'anthropic_empty', 'Anthropic returned an empty response.' );
+  }
+
+  private static function parse_ai_product_json( string $raw_text ): ?array {
+    $cleaned = trim( $raw_text );
+    $cleaned = (string) preg_replace( '/^```(?:json)?\s*|\s*```$/i', '', $cleaned );
+    $decoded = json_decode( $cleaned, true );
+    if ( ! is_array( $decoded ) && preg_match( '/\{[\s\S]*\}/', $cleaned, $json_match ) ) {
+      $decoded = json_decode( $json_match[0], true );
+    }
+    if ( ! is_array( $decoded ) ) {
+      return null;
+    }
+    $title = self::parse_title( $decoded['title'] ?? '' );
+    if ( '' === $title ) {
+      return null;
+    }
+    $description = isset( $decoded['description'] ) && is_scalar( $decoded['description'] )
+      ? trim( sanitize_textarea_field( (string) $decoded['description'] ) )
+      : '';
+    if ( strlen( $description ) > 400 ) {
+      $description = function_exists( 'mb_substr' ) ? mb_substr( $description, 0, 400 ) : substr( $description, 0, 400 );
+    }
+    $msrp_val = self::parse_price( $decoded['msrp'] ?? null );
+    $msrp     = null !== $msrp_val ? (float) self::price_out( $msrp_val ) : null;
+    $category = isset( $decoded['category'] ) && is_scalar( $decoded['category'] )
+      ? trim( sanitize_text_field( (string) $decoded['category'] ) )
+      : '';
+    return [
+      'title'       => $title,
+      'description' => $description,
+      'msrp'        => $msrp,
+      'category'    => $category,
+      'source'      => 'ai',
+    ];
   }
 
   /* ------------------------------------------------------------------ */

@@ -32,6 +32,7 @@ class Xophz_Compass_Bazaar_Security_Policy {
     'bazaar_quick_lookup'                => [ 'bazaar_manage_catalog', 'bazaar_manage_stock', 'bazaar_receive' ],
     'bazaar_quick_recent'                => [ 'bazaar_manage_catalog', 'bazaar_manage_stock', 'bazaar_receive' ],
     'bazaar_quick_image'                 => [ 'bazaar_manage_catalog', 'bazaar_manage_stock', 'bazaar_receive' ],
+    'bazaar_quick_ai_identify'           => [ 'bazaar_manage_catalog', 'bazaar_manage_stock', 'bazaar_receive' ],
     'bazaar_quick_save'                  => [ 'bazaar_manage_stock', 'bazaar_manage_catalog' ],
     'bazaar_quick_undo'                  => [ 'bazaar_manage_stock', 'bazaar_manage_catalog' ],
 
