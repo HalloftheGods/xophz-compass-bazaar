@@ -78,6 +78,7 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
 
   public $action_hooks = [
     'wp_ajax_bazaar_quick_lookup'      => 'quickLookup',
+    'wp_ajax_bazaar_quick_restore'     => 'quickRestore',
     'wp_ajax_bazaar_quick_save'        => 'quickSave',
     'wp_ajax_bazaar_quick_undo'        => 'quickUndo',
     'wp_ajax_bazaar_quick_recent'      => 'quickRecent',
@@ -120,6 +121,7 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
     $c = 'Xophz_Compass_Bazaar_Security_Capabilities';
     return [
       'bazaar_quick_lookup'      => [ $c::MANAGE_CATALOG, $c::MANAGE_STOCK, $c::RECEIVE ],
+      'bazaar_quick_restore'     => [ $c::MANAGE_STOCK, $c::MANAGE_CATALOG ],
       'bazaar_quick_save'        => [ $c::MANAGE_STOCK, $c::MANAGE_CATALOG ],
       'bazaar_quick_undo'        => [ $c::MANAGE_STOCK, $c::MANAGE_CATALOG ],
       'bazaar_quick_recent'      => [ $c::MANAGE_CATALOG, $c::MANAGE_STOCK, $c::RECEIVE ],
@@ -149,6 +151,37 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       $response = self::failure( 'failed', 'That did not work. Try again.' );
     }
     self::respond( $response );
+  }
+
+  /** AJAX bazaar_quick_restore: untrash a trashed product so Quick Add can restock it. */
+  public function quickRestore() {
+    $this->authorize( 'bazaar_quick_restore' );
+    $args       = Xophz_Compass::get_input_json();
+    $product_id = isset( $args->product_id ) ? absint( $args->product_id ) : 0;
+    if ( $product_id <= 0 ) {
+      self::respond( self::failure( 'invalid_product', 'No trashed product specified.' ) );
+      return;
+    }
+    $raw = wc_get_product( $product_id );
+    if ( ! $raw ) {
+      self::respond( self::failure( 'not_found', 'That item is no longer in the trash.' ) );
+      return;
+    }
+    if ( 'trash' === $raw->get_status() ) {
+      wp_untrash_post( $product_id );
+    }
+    $product = self::editable_product( $product_id );
+    if ( ! $product ) {
+      self::respond( self::unavailable( $product_id ) );
+      return;
+    }
+    $last = get_post_meta( $product->get_id(), self::LAST_QTY_META, true );
+    self::respond( [
+      'success'  => true,
+      'existing' => self::product_view( $product ) + [
+        'last_added_qty' => is_numeric( $last ) && (int) $last > 0 ? (int) $last : null,
+      ],
+    ] );
   }
 
   /** AJAX bazaar_quick_save. */
@@ -287,22 +320,32 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       'success'       => true,
       'barcode'       => [ 'raw' => $code['raw'], 'normalized' => $code['normalized'], 'valid' => $code['valid'] ],
       'existing'      => null,
+      'trashed'       => null,
       'draft'         => null,
       'price_hint'    => null,
       'sources_tried' => [],
     ];
 
     $product_id = self::find_existing( $code );
-    $product    = $product_id ? self::editable_product( $product_id ) : null;
-    if ( $product_id && ! $product ) {
-      return self::unavailable( $product_id );
-    }
-    if ( $product ) {
-      $last = get_post_meta( $product->get_id(), self::LAST_QTY_META, true );
-      $out['existing'] = self::product_view( $product ) + [
-        'last_added_qty' => is_numeric( $last ) && (int) $last > 0 ? (int) $last : null,
-      ];
-      return $out;
+    if ( $product_id > 0 ) {
+      $raw_product = wc_get_product( $product_id );
+      if ( $raw_product && 'trash' === $raw_product->get_status() ) {
+        $last = get_post_meta( $raw_product->get_id(), self::LAST_QTY_META, true );
+        $out['trashed'] = self::product_view( $raw_product ) + [
+          'last_added_qty' => is_numeric( $last ) && (int) $last > 0 ? (int) $last : null,
+        ];
+      } elseif ( $raw_product ) {
+        $product = self::editable_product( $product_id );
+        if ( ! $product ) {
+          return self::unavailable( $product_id );
+        }
+        $last = get_post_meta( $product->get_id(), self::LAST_QTY_META, true );
+        $out['existing'] = self::product_view( $product ) + [
+          'last_added_qty' => is_numeric( $last ) && (int) $last > 0 ? (int) $last : null,
+        ];
+        return $out;
+      }
+      // Orphaned postmeta row (deleted post): ignore and fall through to online lookup.
     }
 
     // Only a code with a valid check digit is worth a provider call; a typo is not.
@@ -598,12 +641,20 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
     try {
       $product->set_sku( $sku );
     } catch ( WC_Data_Exception $e ) {
-      // Another save took this SKU since the duplicate check: restock that item instead.
       $existing = self::find_existing( $barcode );
       if ( $existing > 0 ) {
-        return $this->apply_add( $existing, $qty, $price, $uuid, $user_id, $barcode );
+        $existing_product = wc_get_product( $existing );
+        if ( $existing_product && 'trash' === $existing_product->get_status() ) {
+          $existing_product->set_sku( '' );
+          $existing_product->save();
+          $product->set_sku( $sku );
+        } else {
+          // Another save took this SKU since the duplicate check: restock that item instead.
+          return $this->apply_add( $existing, $qty, $price, $uuid, $user_id, $barcode );
+        }
+      } else {
+        throw $e;
       }
-      throw $e;
     }
     if ( $barcode['valid'] && method_exists( $product, 'set_global_unique_id' ) ) {
       try {
