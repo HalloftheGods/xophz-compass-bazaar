@@ -109,6 +109,10 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
   const TITLE_MAX          = 200;
   const IMAGE_HOSTS        = Xophz_Compass_Bazaar_Barcode_Sources::IMAGE_HOSTS;
   const IMAGE_BUDGET       = 15;
+  // AI photo guardrails: one cashier scanning a pile cannot run up the AI bill.
+  const AI_IMAGE_MAX_BYTES = 4194304; // 4 MB decoded.
+  const AI_PER_MINUTE      = 12;
+  const AI_PER_DAY         = 300;
 
   /**
    * The Bazaar caps each action needs (any one of them). Read by
@@ -303,12 +307,61 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       self::respond( self::failure( 'invalid_image', 'Take a clear product photo first.' ) );
     }
 
+    $refusal = self::ai_guard_refusal( self::ai_decoded_size( $b64 ), self::ai_usage_count( 'minute' ), self::ai_usage_count( 'day' ), (array) apply_filters( 'bazaar_quick_ai_limits', [] ) );
+    if ( null !== $refusal ) {
+      self::respond( self::failure( $refusal['code'], $refusal['message'] ) );
+    }
+    self::ai_usage_bump();
+
     try {
       $result = self::ai_identify_from_photo( $mime, $b64, $barcode );
       self::respond( $result );
     } catch ( \Throwable $e ) {
       error_log( 'bazaar_quick_ai_identify: ' . $e->getMessage() );
       self::respond( self::failure( 'ai_failed', 'AI identification failed. Try again or enter details manually.' ) );
+    }
+  }
+
+  /** Bytes the base64 text decodes to, without decoding it. */
+  public static function ai_decoded_size( string $b64 ): int {
+    $padding = strlen( $b64 ) - strlen( rtrim( $b64, '=' ) );
+    return max( 0, (int) ( strlen( $b64 ) * 3 / 4 ) - min( 2, $padding ) );
+  }
+
+  /**
+   * Pure verdict for one AI photo request: null to proceed, else the refusal.
+   * Limits are filterable via `bazaar_quick_ai_limits` (max_bytes, per_minute, per_day).
+   *
+   * @return array{code:string,message:string}|null
+   */
+  public static function ai_guard_refusal( int $bytes, int $used_minute, int $used_day, array $limits = [] ): ?array {
+    $max_bytes  = (int) ( $limits['max_bytes'] ?? self::AI_IMAGE_MAX_BYTES );
+    $per_minute = (int) ( $limits['per_minute'] ?? self::AI_PER_MINUTE );
+    $per_day    = (int) ( $limits['per_day'] ?? self::AI_PER_DAY );
+    if ( $bytes > $max_bytes ) {
+      return [ 'code' => 'image_too_large', 'message' => 'That picture is too big. Take it again a little farther back.' ];
+    }
+    if ( $used_day >= $per_day ) {
+      return [ 'code' => 'ai_daily_limit', 'message' => 'The AI has done its share for today. Type the name instead.' ];
+    }
+    if ( $used_minute >= $per_minute ) {
+      return [ 'code' => 'ai_slow_down', 'message' => 'Slow down a moment, then try the AI again. You can type the name now.' ];
+    }
+    return null;
+  }
+
+  private static function ai_usage_key( string $window ): string {
+    $stamp = 'minute' === $window ? gmdate( 'YmdHi' ) : gmdate( 'Ymd' );
+    return 'bazaar_quick_ai_' . $window . '_' . get_current_user_id() . '_' . $stamp;
+  }
+
+  private static function ai_usage_count( string $window ): int {
+    return (int) get_transient( self::ai_usage_key( $window ) );
+  }
+
+  private static function ai_usage_bump(): void {
+    foreach ( [ 'minute' => 120, 'day' => DAY_IN_SECONDS ] as $window => $ttl ) {
+      set_transient( self::ai_usage_key( $window ), self::ai_usage_count( $window ) + 1, $ttl );
     }
   }
 
