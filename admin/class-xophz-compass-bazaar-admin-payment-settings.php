@@ -128,17 +128,20 @@ class Xophz_Compass_Bazaar_Admin_Payment_Settings {
 
       foreach ( $gateways as $gateway ) {
         $is_enabled  = ( $gateway->enabled === 'yes' );
-        $needs_setup = false;
+        $needs_setup = method_exists( $gateway, 'needs_setup' ) ? (bool) $gateway->needs_setup() : false;
 
-        // Detect credential requirements (e.g. Stripe)
-        if ( $gateway->id === 'stripe' || strpos( $gateway->id, 'stripe' ) !== false ) {
+        // Detect credential requirements (e.g. Stripe) when needs_setup() does not report it.
+        if ( ! $needs_setup && ( $gateway->id === 'stripe' || strpos( $gateway->id, 'stripe' ) !== false ) ) {
           $secret_key = $gateway->get_option( 'secret_key' ) ?: $gateway->get_option( 'test_secret_key' );
           if ( empty( $secret_key ) ) {
             $needs_setup = true;
           }
         }
 
-        $raw_title = $gateway->title ?: $gateway->get_method_title();
+        $default_setup_url = admin_url( 'admin.php?page=wc-settings&tab=checkout&section=' . rawurlencode( (string) $gateway->id ) );
+        $custom_setup_url  = method_exists( $gateway, 'get_settings_url' ) ? (string) $gateway->get_settings_url() : '';
+        $setup_url         = $custom_setup_url !== '' ? $custom_setup_url : $default_setup_url;
+        $raw_title         = $gateway->title ?: $gateway->get_method_title();
 
         $data[] = [
           'id'           => $gateway->id,
@@ -147,6 +150,8 @@ class Xophz_Compass_Bazaar_Admin_Payment_Settings {
           'description'  => $gateway->description ?: '',
           'enabled'      => $is_enabled,
           'needs_setup'  => $needs_setup,
+          'setup_url'    => $setup_url,
+          'setup_label'  => $needs_setup ? 'Complete Setup' : 'Configure',
         ];
       }
 

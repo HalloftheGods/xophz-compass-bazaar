@@ -265,7 +265,12 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
         ];
       }
     }
-    self::respond( [ 'success' => true, 'today_count' => $count, 'items' => $items ] );
+    self::respond( [
+      'success'     => true,
+      'today_count' => $count,
+      'items'       => $items,
+      'ai_info'     => self::ai_vision_info(),
+    ] );
   }
 
   /** AJAX bazaar_quick_image. */
@@ -1422,12 +1427,22 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
         $last_error = $raw->get_error_message();
         continue;
       }
-      $draft = self::parse_ai_product_json( $raw );
+      $draft = self::parse_ai_product_json( $raw['text'] );
       if ( null !== $draft ) {
+        $in_tokens  = (int) ( $raw['input_tokens'] ?? 0 );
+        $out_tokens = (int) ( $raw['output_tokens'] ?? 0 );
+        $model_used = (string) ( $raw['model'] ?? '' );
         return [
           'success'    => true,
           'provider'   => $provider,
           'draft'      => $draft,
+          'usage'      => [
+            'provider'      => $provider,
+            'model'         => $model_used,
+            'input_tokens'  => $in_tokens,
+            'output_tokens' => $out_tokens,
+            'cost_usd'      => self::ai_estimate_cost_usd( $model_used, $in_tokens, $out_tokens ),
+          ],
           'price_hint' => null !== $draft['msrp'] ? [
             'low'    => self::price_out( (float) $draft['msrp'] ),
             'high'   => null,
@@ -1485,6 +1500,72 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
     return '' !== $model ? $model : $fallback;
   }
 
+  /** Approximate USD per 1M tokens [ input, output ] for vision models. */
+  private static function ai_model_rates( string $model ): array {
+    $m = strtolower( $model );
+    if ( false !== strpos( $m, 'gemini' ) ) {
+      return false !== strpos( $m, 'pro' ) ? [ 1.25, 10.0 ] : [ 0.15, 0.60 ];
+    }
+    if ( false !== strpos( $m, 'gpt-4o-mini' ) ) {
+      return [ 0.15, 0.60 ];
+    }
+    if ( false !== strpos( $m, 'gpt-4.1-mini' ) ) {
+      return [ 0.40, 1.60 ];
+    }
+    if ( false !== strpos( $m, 'gpt-4.1' ) ) {
+      return [ 2.00, 8.00 ];
+    }
+    if ( false !== strpos( $m, 'gpt-4o' ) ) {
+      return [ 2.50, 10.0 ];
+    }
+    if ( false !== strpos( $m, 'haiku' ) ) {
+      return [ 0.80, 4.00 ];
+    }
+    if ( false !== strpos( $m, 'opus' ) ) {
+      return [ 15.0, 75.0 ];
+    }
+    if ( false !== strpos( $m, 'claude' ) ) {
+      return [ 3.00, 15.0 ];
+    }
+    return [ 0.15, 0.60 ];
+  }
+
+  private static function ai_estimate_cost_usd( string $model, int $input_tokens, int $output_tokens ): float {
+    [ $in_rate, $out_rate ] = self::ai_model_rates( $model );
+    $usd                    = ( ( $input_tokens * $in_rate ) + ( $output_tokens * $out_rate ) ) / 1000000;
+    return round( max( 0.0, $usd ), 6 );
+  }
+
+  private static function ai_vision_info(): array {
+    $providers = [
+      'google'    => [ 'fallback' => 'gemini-3.6-flash', 'in' => 400, 'out' => 120 ],
+      'openai'    => [ 'fallback' => 'gpt-4o-mini', 'in' => 900, 'out' => 120 ],
+      'anthropic' => [ 'fallback' => 'claude-sonnet-4-20250514', 'in' => 1200, 'out' => 120 ],
+    ];
+    foreach ( $providers as $id => $spec ) {
+      if ( '' === self::connector_key( $id ) ) {
+        continue;
+      }
+      $model = self::connector_model( $id, $spec['fallback'] );
+      return [
+        'configured'        => true,
+        'provider'          => $id,
+        'model'             => $model,
+        'est_input_tokens'  => $spec['in'],
+        'est_output_tokens' => $spec['out'],
+        'est_cost_usd'      => self::ai_estimate_cost_usd( $model, $spec['in'], $spec['out'] ),
+      ];
+    }
+    return [
+      'configured'        => false,
+      'provider'          => '',
+      'model'             => '',
+      'est_input_tokens'  => 0,
+      'est_output_tokens' => 0,
+      'est_cost_usd'      => 0.0,
+    ];
+  }
+
   private static function call_gemini_vision( string $api_key, string $prompt, string $mime, string $b64 ) {
     $primary = self::connector_model( 'google', 'gemini-3.6-flash' );
     $models  = array_values( array_unique( [ $primary, 'gemini-3.6-flash', 'gemini-3.5-flash' ] ) );
@@ -1537,7 +1618,13 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       $decoded = json_decode( $body, true );
       $text    = is_array( $decoded ) ? (string) ( $decoded['candidates'][0]['content']['parts'][0]['text'] ?? '' ) : '';
       if ( '' !== $text ) {
-        return $text;
+        $usage = is_array( $decoded['usageMetadata'] ?? null ) ? $decoded['usageMetadata'] : [];
+        return [
+          'text'          => $text,
+          'model'         => $model,
+          'input_tokens'  => (int) ( $usage['promptTokenCount'] ?? 0 ),
+          'output_tokens' => (int) ( $usage['candidatesTokenCount'] ?? 0 ),
+        ];
       }
       $last_error = new WP_Error( 'gemini_empty', 'Gemini returned an empty response.' );
     }
@@ -1578,7 +1665,16 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       return new WP_Error( 'openai_http_error', $msg );
     }
     $text = is_array( $decoded ) ? (string) ( $decoded['choices'][0]['message']['content'] ?? '' ) : '';
-    return '' !== $text ? $text : new WP_Error( 'openai_empty', 'OpenAI returned an empty response.' );
+    if ( '' === $text ) {
+      return new WP_Error( 'openai_empty', 'OpenAI returned an empty response.' );
+    }
+    $usage = is_array( $decoded['usage'] ?? null ) ? $decoded['usage'] : [];
+    return [
+      'text'          => $text,
+      'model'         => $model,
+      'input_tokens'  => (int) ( $usage['prompt_tokens'] ?? 0 ),
+      'output_tokens' => (int) ( $usage['completion_tokens'] ?? 0 ),
+    ];
   }
 
   private static function call_anthropic_vision( string $api_key, string $prompt, string $mime, string $b64 ) {
@@ -1622,7 +1718,16 @@ class Xophz_Compass_Bazaar_Admin_Quick_Add {
       return new WP_Error( 'anthropic_http_error', $msg );
     }
     $text = is_array( $decoded ) ? (string) ( $decoded['content'][0]['text'] ?? '' ) : '';
-    return '' !== $text ? $text : new WP_Error( 'anthropic_empty', 'Anthropic returned an empty response.' );
+    if ( '' === $text ) {
+      return new WP_Error( 'anthropic_empty', 'Anthropic returned an empty response.' );
+    }
+    $usage = is_array( $decoded['usage'] ?? null ) ? $decoded['usage'] : [];
+    return [
+      'text'          => $text,
+      'model'         => $model,
+      'input_tokens'  => (int) ( $usage['input_tokens'] ?? 0 ),
+      'output_tokens' => (int) ( $usage['output_tokens'] ?? 0 ),
+    ];
   }
 
   private static function parse_ai_product_json( string $raw_text ): ?array {

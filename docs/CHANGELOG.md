@@ -2,6 +2,13 @@
 
 All notable changes to the Compass Bazaar plugin. Newest first.
 
+## 2026-11-22
+
+### Added
+- **AI Vision Token Usage & Cost Estimation**: Track input and output tokens across Gemini, OpenAI, and Anthropic vision requests with model-specific rate calculation and estimated cost in USD. Added `ai_info` metadata to quick add status responses.
+- **Payment Gateway Setup URL Deep Linking**: Added direct `setup_url` and `setup_label` properties to payment gateway responses, supporting both WooCommerce native section routing and custom gateway settings URLs.
+
+
 ## 2026-11-18
 
 ### Added
